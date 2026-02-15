@@ -1,0 +1,23 @@
+# Python cache and virtualenv
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Runtime/local data
+data/
+logs/
+
+# Local binaries and archives (not for GitHub)
+bin/stockfish.exe
+bin/stockfish.zip
+bin/stockfish_unpack/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+
+# Reference exports
+*.mhtml
