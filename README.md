@@ -1,17 +1,17 @@
-# Chess PGN Analyzer (Stockfish)
+п»ї# Chess PGN Analyzer (Stockfish)
 
-Веб-приложение для анализа шахматных партий из Chess.com и PGN.
+Web app for analyzing chess games from Chess.com and PGN.
 
-## Возможности
-- загрузка партий с Chess.com PubAPI по username или ссылке профиля;
-- анализ выбранной партии и сохранение анализа в локальный кэш;
-- загрузка PGN из файла, текстом и из буфера обмена;
-- интерактивная доска с ручным разбором вариантов;
-- категории ходов: `Brilliant`, `Great`, `Book`, `Best`, `Excellent`, `Good`, `Inaccuracy`, `Mistake`, `Miss`, `Blunder`;
-- подсветка рекомендаций Stockfish и график преимущества;
-- логирование API-запросов и анализа.
+## Features
+- Load games from Chess.com PubAPI by username or profile URL.
+- Analyze a selected game and save results in local cache.
+- Load PGN from file, text input, or clipboard.
+- Interactive board with manual variation analysis.
+- Move categories: `Brilliant`, `Great`, `Book`, `Best`, `Excellent`, `Good`, `Inaccuracy`, `Mistake`, `Miss`, `Blunder`.
+- Stockfish recommendations with arrows and advantage chart.
+- API and analysis logging.
 
-## Быстрый запуск
+## Quick Start
 ```powershell
 cd C:\Scirpts\Chess
 py -3 -m venv .venv
@@ -21,31 +21,31 @@ pip install -r requirements.txt
 python run_server.py
 ```
 
-Откройте в браузере: `http://127.0.0.1:5000`
+Open in browser: `http://127.0.0.1:5000`
 
 ## Stockfish
-В репозиторий движок не добавляется (бинарники большие).
-Укажите путь одним из способов:
+The engine binary is not included in the repository (large binaries are excluded).
+Set the path in one of these ways:
 
-1. Через переменную окружения `STOCKFISH_PATH`:
+1. Via `STOCKFISH_PATH` environment variable:
 ```powershell
 $env:STOCKFISH_PATH="C:\path\to\stockfish.exe"
 ```
-2. Или положите `stockfish.exe` в `bin\stockfish.exe` (локально, не в git).
+2. Or place `stockfish.exe` at `bin\stockfish.exe` (locally, not in git).
 
-Порядок поиска движка в коде:
+Engine lookup order in code:
 1. `STOCKFISH_PATH`;
-2. `stockfish`/`stockfish.exe` в `PATH`;
+2. `stockfish` / `stockfish.exe` in `PATH`;
 3. `./bin/stockfish(.exe)`;
 4. `C:\Program Files\Stockfish\stockfish.exe`.
 
-## Где хранятся данные
-- `data/chesscom_games_store.json` - загруженные партии Chess.com;
-- `data/analysis_store.json` - сохраненные результаты анализа;
-- `logs/app.log` - лог приложения.
+## Data Storage
+- `data/chesscom_games_store.json` - loaded Chess.com games;
+- `data/analysis_store.json` - saved analysis results;
+- `logs/app.log` - app log.
 
-Эти файлы локальные и в git не коммитятся.
+These files are local and are not committed to git.
 
-## Username Chess.com
-- В поле username нет значения по умолчанию.
-- После первого ввода и загрузки игр имя сохраняется в браузере (`localStorage`) и подставляется автоматически.
+## Chess.com Username
+- The username input has no default value.
+- After first input and game load, the name is saved in browser `localStorage` and auto-filled later.
