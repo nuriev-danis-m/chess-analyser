@@ -39,8 +39,10 @@ const CATEGORY_COLORS = {
 
 const DARK_SIDE_TONE = "#686f76";
 const LIGHT_SIDE_TONE = "#efefea";
+const BOARD_MOVE_ANIMATION_MS = 420;
 const STORAGE_KEYS = {
-  chesscomUsername: "chess_analyzer.chesscom_username"
+  chesscomUsername: "chess_analyzer.chesscom_username",
+  chesscomMaxGames: "chess_analyzer.chesscom_max_games"
 };
 
 const state = {
@@ -60,7 +62,8 @@ const state = {
   selectedVariationIndex: null,
   liveAnalyzeTimer: null,
   liveAnalyzeToken: 0,
-  analysisBusy: false
+  analysisBusy: false,
+  massAnalyzeRunning: false
 };
 
 const detectedCpuThreads = Math.max(
@@ -76,9 +79,14 @@ const el = {
   chesscomUsername: document.getElementById("chesscom-username"),
   chesscomMaxGames: document.getElementById("chesscom-max-games"),
   chesscomLoadBtn: document.getElementById("btn-load-chesscom"),
+  chesscomLoadAnalyzeBtn: document.getElementById("btn-load-chesscom-analyze"),
+  analyzeMissingBtn: document.getElementById("btn-analyze-missing"),
+  reanalyzeAllBtn: document.getElementById("btn-reanalyze-all"),
+  openStatsBtn: document.getElementById("btn-open-stats"),
   chesscomStatus: document.getElementById("chesscom-status"),
   chesscomGames: document.getElementById("chesscom-games"),
   overviewChart: document.getElementById("overview-chart"),
+  openingInsights: document.getElementById("opening-insights"),
 
   pgnFile: document.getElementById("pgn-file"),
   pgnText: document.getElementById("pgn-text"),
@@ -138,7 +146,7 @@ function resolveChessCtor() {
 function createChess(fen) {
   const ChessCtor = resolveChessCtor();
   if (!ChessCtor) {
-    throw new Error("Chess.js не загружен");
+    throw new Error("Chess.js is not loaded");
   }
   return fen ? new ChessCtor(fen) : new ChessCtor();
 }
@@ -195,6 +203,19 @@ function readStoredUsername() {
   }
 }
 
+function readStoredMaxGames() {
+  try {
+    const value = window.localStorage.getItem(STORAGE_KEYS.chesscomMaxGames);
+    const parsed = Number(String(value || "").trim());
+    if (!Number.isFinite(parsed)) {
+      return null;
+    }
+    return Math.max(1, Math.min(5000, Math.floor(parsed)));
+  } catch (error) {
+    return null;
+  }
+}
+
 function persistUsername(value) {
   const normalized = String(value || "").trim();
   try {
@@ -203,6 +224,19 @@ function persistUsername(value) {
     } else {
       window.localStorage.removeItem(STORAGE_KEYS.chesscomUsername);
     }
+  } catch (error) {
+    // Ignore storage errors (private mode / blocked storage).
+  }
+}
+
+function persistMaxGames(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return;
+  }
+  const normalized = Math.max(1, Math.min(5000, Math.floor(parsed)));
+  try {
+    window.localStorage.setItem(STORAGE_KEYS.chesscomMaxGames, String(normalized));
   } catch (error) {
     // Ignore storage errors (private mode / blocked storage).
   }
@@ -253,11 +287,26 @@ function analysisRequestTimeoutMs() {
 
 function setSelectionBusy(isBusy, label) {
   el.chesscomLoadBtn.disabled = isBusy;
-  el.chesscomLoadBtn.textContent = label || "Загрузить игры";
+  if (el.chesscomLoadAnalyzeBtn) {
+    el.chesscomLoadAnalyzeBtn.disabled = isBusy || state.massAnalyzeRunning;
+  }
+  if (el.analyzeMissingBtn) {
+    el.analyzeMissingBtn.disabled = isBusy || state.massAnalyzeRunning;
+  }
+  if (el.reanalyzeAllBtn) {
+    el.reanalyzeAllBtn.disabled = isBusy || state.massAnalyzeRunning;
+  }
+  if (el.openStatsBtn) {
+    el.openStatsBtn.disabled = isBusy || state.massAnalyzeRunning;
+  }
+  if (el.chesscomLoadAnalyzeBtn) {
+    el.chesscomLoadAnalyzeBtn.textContent = isBusy ? (label || "Loading...") : "Load and Analyze";
+  }
+  el.chesscomLoadBtn.textContent = isBusy ? (label || "Loading...") : "Load";
 }
 
 function setAnalyzeBusy(isBusy, label) {
-  const text = label || "Анализировать";
+  const text = label || "Analyze";
   [el.analyzeFileBtn, el.analyzeTextBtn, el.pasteAnalyzeBtn].forEach((button) => {
     if (button) {
       button.disabled = isBusy;
@@ -276,8 +325,47 @@ function setGlobalAnalysisBusy(isBusy) {
       button.disabled = disabled;
     }
   });
+  if (el.chesscomLoadBtn) {
+    el.chesscomLoadBtn.disabled = disabled || state.massAnalyzeRunning;
+  }
+  if (el.chesscomLoadAnalyzeBtn) {
+    el.chesscomLoadAnalyzeBtn.disabled = disabled || state.massAnalyzeRunning;
+  }
+  if (el.analyzeMissingBtn) {
+    el.analyzeMissingBtn.disabled = disabled || state.massAnalyzeRunning;
+  }
+  if (el.reanalyzeAllBtn) {
+    el.reanalyzeAllBtn.disabled = disabled || state.massAnalyzeRunning;
+  }
+  if (el.openStatsBtn) {
+    el.openStatsBtn.disabled = disabled || state.massAnalyzeRunning;
+  }
   [...document.querySelectorAll(".review-btn")].forEach((button) => {
     button.disabled = disabled;
+  });
+}
+
+function setMassAnalyzeRunning(isRunning, label) {
+  state.massAnalyzeRunning = Boolean(isRunning);
+  if (el.analyzeMissingBtn) {
+    el.analyzeMissingBtn.disabled = state.massAnalyzeRunning || state.analysisBusy;
+    el.analyzeMissingBtn.textContent = label || "Analyze Unanalyzed";
+  }
+  if (el.reanalyzeAllBtn) {
+    el.reanalyzeAllBtn.disabled = state.massAnalyzeRunning || state.analysisBusy;
+    el.reanalyzeAllBtn.textContent = label || "Reanalyze All";
+  }
+  if (el.chesscomLoadBtn) {
+    el.chesscomLoadBtn.disabled = state.massAnalyzeRunning || state.analysisBusy;
+  }
+  if (el.chesscomLoadAnalyzeBtn) {
+    el.chesscomLoadAnalyzeBtn.disabled = state.massAnalyzeRunning || state.analysisBusy;
+  }
+  if (el.openStatsBtn) {
+    el.openStatsBtn.disabled = state.massAnalyzeRunning || state.analysisBusy;
+  }
+  [...document.querySelectorAll(".review-btn")].forEach((button) => {
+    button.disabled = state.massAnalyzeRunning || state.analysisBusy;
   });
 }
 
@@ -337,7 +425,7 @@ function setCategory(category) {
 
 function renderHistoryList() {
   if (!state.chesscomGames.length) {
-    el.chesscomGames.innerHTML = "<div class='history-empty'>Игры пока не загружены.</div>";
+    el.chesscomGames.innerHTML = "<div class='history-empty'>No games loaded yet.</div>";
     renderOverviewChart();
     return;
   }
@@ -407,6 +495,143 @@ function renderHistoryList() {
   renderOverviewChart();
 }
 
+function normalizeResultBucket(game) {
+  const rawBucket = String((game && game.player_result_bucket) || "").trim().toLowerCase();
+  if (rawBucket === "win" || rawBucket === "loss" || rawBucket === "draw") {
+    return rawBucket;
+  }
+  const rawResult = String((game && game.player_result) || "").trim().toLowerCase();
+  if (!rawResult) {
+    return "other";
+  }
+  if (rawResult === "win" || rawResult.includes("win")) {
+    return "win";
+  }
+  if (
+    rawResult.includes("lose") ||
+    rawResult.includes("loss") ||
+    rawResult.includes("checkmated") ||
+    rawResult.includes("resigned") ||
+    rawResult.includes("timeout")
+  ) {
+    return "loss";
+  }
+  if (
+    rawResult.includes("draw") ||
+    ["agreed", "repetition", "stalemate", "insufficient", "50move", "timevsinsufficient", "1/2-1/2"].includes(rawResult)
+  ) {
+    return "draw";
+  }
+  return "other";
+}
+
+function renderOpeningInsights() {
+  if (!el.openingInsights) {
+    return;
+  }
+  if (!state.chesscomGames.length) {
+    el.openingInsights.innerHTML = "<div class='history-empty'>Load games to analyze openings.</div>";
+    return;
+  }
+
+  const grouped = new Map();
+  state.chesscomGames.forEach((game) => {
+    const opening = String((game && game.opening) || "").trim() || "Unknown opening";
+    const eco = String((game && game.eco) || "").trim() || "-";
+    const key = `${eco}||${opening}`;
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        eco,
+        opening,
+        games: 0,
+        wins: 0,
+        draws: 0,
+        losses: 0,
+        accSum: 0,
+        accCount: 0
+      });
+    }
+    const row = grouped.get(key);
+    row.games += 1;
+
+    const resultBucket = normalizeResultBucket(game);
+    if (resultBucket === "win") {
+      row.wins += 1;
+    } else if (resultBucket === "draw") {
+      row.draws += 1;
+    } else if (resultBucket === "loss") {
+      row.losses += 1;
+    }
+
+    const accuracy = parseFiniteNumber(game.last_accuracy);
+    if (accuracy !== null) {
+      row.accSum += accuracy;
+      row.accCount += 1;
+    }
+  });
+
+  const rows = [...grouped.values()]
+    .map((row) => {
+      const lossRate = row.games ? (row.losses / row.games) * 100 : 0;
+      const scoreRate = row.games ? ((row.wins + row.draws * 0.5) / row.games) * 100 : 0;
+      const avgAccuracy = row.accCount ? row.accSum / row.accCount : null;
+      return {
+        ...row,
+        lossRate,
+        scoreRate,
+        avgAccuracy
+      };
+    })
+    .sort((a, b) => b.lossRate - a.lossRate || b.losses - a.losses || b.games - a.games || a.opening.localeCompare(b.opening));
+
+  const withMinGames = rows.filter((row) => row.games >= 2);
+  const topRows = (withMinGames.length ? withMinGames : rows).slice(0, 12);
+  if (!topRows.length) {
+    el.openingInsights.innerHTML = "<div class='history-empty'>Not enough opening data.</div>";
+    return;
+  }
+
+  const bodyRows = topRows
+    .map((row) => {
+      const lossClass = row.lossRate >= 55 ? "high" : row.lossRate >= 35 ? "mid" : "";
+      const avgAccuracyLabel = row.avgAccuracy === null ? "-" : `${row.avgAccuracy.toFixed(1)}%`;
+      return `
+        <tr>
+          <td>
+            <div class="opening-name">${escapeHtml(row.opening)}</div>
+            <div class="opening-eco">${escapeHtml(row.eco)}</div>
+          </td>
+          <td>${row.games}</td>
+          <td>${row.wins}</td>
+          <td>${row.draws}</td>
+          <td>${row.losses}</td>
+          <td class="opening-loss-rate ${lossClass}">${row.lossRate.toFixed(1)}%</td>
+          <td>${row.scoreRate.toFixed(1)}%</td>
+          <td>${avgAccuracyLabel}</td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  el.openingInsights.innerHTML = `
+    <table class="opening-table">
+      <thead>
+        <tr>
+          <th>Opening</th>
+          <th>Games</th>
+          <th>W</th>
+          <th>D</th>
+          <th>L</th>
+          <th>Loss %</th>
+          <th>Score %</th>
+          <th>Avg Acc</th>
+        </tr>
+      </thead>
+      <tbody>${bodyRows}</tbody>
+    </table>
+  `;
+}
+
 function renderOverviewChart() {
   if (!el.overviewChart) {
     return;
@@ -416,7 +641,7 @@ function renderOverviewChart() {
     (a, b) => Number(a.end_time || 0) - Number(b.end_time || 0)
   );
   if (!games.length) {
-    el.overviewChart.innerHTML = "<div class='history-empty'>Загрузите игры для построения графика.</div>";
+    el.overviewChart.innerHTML = "<div class='history-empty'>Load games to build the chart.</div>";
     return;
   }
 
@@ -461,23 +686,6 @@ function renderOverviewChart() {
     .filter(Boolean)
     .join(" ");
 
-  const ratingDots = ratingSeries
-    .map((rating, idx) => {
-      if (!Number.isFinite(rating)) {
-        return "";
-      }
-      return `<circle cx="${xAt(idx).toFixed(2)}" cy="${yFromRating(rating).toFixed(2)}" r="2.6" fill="#7aaeff" />`;
-    })
-    .join("");
-  const accuracyDots = accuracySeries
-    .map((accuracy, idx) => {
-      if (!Number.isFinite(accuracy)) {
-        return "";
-      }
-      return `<circle cx="${xAt(idx).toFixed(2)}" cy="${yFromAccuracy(accuracy).toFixed(2)}" r="2.6" fill="#95ca5f" />`;
-    })
-    .join("");
-
   el.overviewChart.innerHTML = `
     <div class="overview-legend">
       <span><span class="legend-dot legend-rating"></span>Rating</span>
@@ -489,8 +697,6 @@ function renderOverviewChart() {
       <line x1="${padX}" y1="${height - padY}" x2="${width - padX}" y2="${height - padY}" stroke="#4c4b47" stroke-width="1" />
       ${ratingPoints ? `<polyline points="${ratingPoints}" fill="none" stroke="#7aaeff" stroke-width="2.0" />` : ""}
       ${accuracyPoints ? `<polyline points="${accuracyPoints}" fill="none" stroke="#95ca5f" stroke-width="2.0" />` : ""}
-      ${ratingDots}
-      ${accuracyDots}
     </svg>
   `;
 }
@@ -511,20 +717,210 @@ function updateGameStatsAfterAnalysis(gameId, analysisData) {
   }
 }
 
+function gamesWithoutSavedAnalysis() {
+  return state.chesscomGames.filter((game) => {
+    const saved = Number(game && game.saved_analyses);
+    return !Number.isFinite(saved) || saved <= 0;
+  });
+}
+
+function gamesWithGameId() {
+  return state.chesscomGames.filter((game) => String((game && game.game_id) || "").trim());
+}
+
+function buildChesscomAnalyzePayload(gameId, side, options = {}) {
+  const forceReanalyze = Boolean(options.forceReanalyze);
+  const allowCompatibleCache = Boolean(options.allowCompatibleCache);
+  return {
+    game_id: gameId,
+    side,
+    depth: analysisDepthValue(),
+    threads: analysisThreadsValue(),
+    hash_mb: analysisHashValue(),
+    target_time_sec: analysisTargetTimeValue(),
+    pv_plies: Number(el.pvPlies.value || 3),
+    force_reanalyze: forceReanalyze,
+    allow_compatible_cache: allowCompatibleCache
+  };
+}
+
+async function analyzeChesscomGameRequest(gameId, side, options = {}) {
+  const timeoutMs = analysisRequestTimeoutMs();
+  const payload = buildChesscomAnalyzePayload(gameId, side, options);
+  const response = await fetchWithTimeout(
+    "/api/chesscom/analyze-game",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    },
+    timeoutMs
+  );
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.error || "Failed to analyze the selected game.");
+  }
+  return data;
+}
+
+async function analyzeMissingChesscomGames() {
+  clearError();
+  if (!state.chesscomGames.length) {
+    showError("Load the games list first.");
+    return;
+  }
+  if (state.analysisBusy || state.massAnalyzeRunning) {
+    return;
+  }
+
+  const queue = gamesWithoutSavedAnalysis();
+  if (!queue.length) {
+    if (el.chesscomStatus) {
+      el.chesscomStatus.textContent = "All loaded games are already analyzed.";
+    }
+    return;
+  }
+
+  setGlobalAnalysisBusy(true);
+  setMassAnalyzeRunning(true, `Analyze 0/${queue.length}`);
+
+  let done = 0;
+  let failed = 0;
+  const failedIds = [];
+
+  try {
+    for (let idx = 0; idx < queue.length; idx += 1) {
+      const game = queue[idx];
+      const gameId = String(game.game_id || "").trim();
+      const side = game.player_side === "black" ? "black" : "white";
+      if (!gameId) {
+        failed += 1;
+        continue;
+      }
+
+      if (el.chesscomStatus) {
+        el.chesscomStatus.textContent = `Batch analysis: ${idx + 1}/${queue.length} (game_id=${gameId})`;
+      }
+      setMassAnalyzeRunning(true, `Analyze ${idx + 1}/${queue.length}`);
+
+      try {
+        const data = await analyzeChesscomGameRequest(gameId, side);
+        updateGameStatsAfterAnalysis(gameId, data);
+        done += 1;
+      } catch (error) {
+        failed += 1;
+        failedIds.push(gameId);
+        // Keep running: one bad game should not stop whole batch.
+      }
+
+      if (idx % 5 === 0 || idx === queue.length - 1) {
+        renderHistoryList();
+      }
+    }
+
+    renderHistoryList();
+    const failLabel = failed ? `, failed: ${failed}` : "";
+    if (el.chesscomStatus) {
+      el.chesscomStatus.textContent = `Batch analysis complete. Success: ${done}${failLabel}.`;
+    }
+    if (failedIds.length) {
+      showError(`Failed to analyze ${failedIds.length} games: ${failedIds.slice(0, 8).join(", ")}${failedIds.length > 8 ? "..." : ""}`);
+    }
+  } finally {
+    setMassAnalyzeRunning(false);
+    setGlobalAnalysisBusy(false);
+  }
+}
+
+async function reanalyzeAllChesscomGames() {
+  clearError();
+  if (!state.chesscomGames.length) {
+    showError("Load the games list first.");
+    return;
+  }
+  if (state.analysisBusy || state.massAnalyzeRunning) {
+    return;
+  }
+
+  const queue = gamesWithGameId();
+  if (!queue.length) {
+    if (el.chesscomStatus) {
+      el.chesscomStatus.textContent = "No games to reanalyze.";
+    }
+    return;
+  }
+
+  setGlobalAnalysisBusy(true);
+  setMassAnalyzeRunning(true, `Reanalyze 0/${queue.length}`);
+
+  let done = 0;
+  let failed = 0;
+  const failedIds = [];
+
+  try {
+    for (let idx = 0; idx < queue.length; idx += 1) {
+      const game = queue[idx];
+      const gameId = String(game.game_id || "").trim();
+      const side = game.player_side === "black" ? "black" : "white";
+      if (!gameId) {
+        failed += 1;
+        continue;
+      }
+
+      if (el.chesscomStatus) {
+        el.chesscomStatus.textContent = `Reanalyze: ${idx + 1}/${queue.length} (game_id=${gameId})`;
+      }
+      setMassAnalyzeRunning(true, `Reanalyze ${idx + 1}/${queue.length}`);
+
+      try {
+        const data = await analyzeChesscomGameRequest(gameId, side, {
+          forceReanalyze: true,
+          allowCompatibleCache: false
+        });
+        updateGameStatsAfterAnalysis(gameId, data);
+        done += 1;
+      } catch (error) {
+        failed += 1;
+        failedIds.push(gameId);
+      }
+
+      if (idx % 5 === 0 || idx === queue.length - 1) {
+        renderHistoryList();
+      }
+    }
+
+    renderHistoryList();
+    const failLabel = failed ? `, failed: ${failed}` : "";
+    if (el.chesscomStatus) {
+      el.chesscomStatus.textContent = `Reanalysis complete. Success: ${done}${failLabel}.`;
+    }
+    if (failedIds.length) {
+      showError(`Failed to reanalyze ${failedIds.length} games: ${failedIds.slice(0, 8).join(", ")}${failedIds.length > 8 ? "..." : ""}`);
+    }
+  } finally {
+    setMassAnalyzeRunning(false);
+    setGlobalAnalysisBusy(false);
+  }
+}
+
 async function loadChesscomGames() {
   clearError();
   const username = String(el.chesscomUsername.value || "").trim();
   const maxRaw = Number(el.chesscomMaxGames.value || 25);
-  const maxGames = Number.isFinite(maxRaw) ? Math.max(1, Math.min(100, Math.floor(maxRaw))) : 25;
+  const maxGames = Number.isFinite(maxRaw) ? Math.max(1, Math.min(5000, Math.floor(maxRaw))) : 25;
 
   if (!username) {
-    showError("Введите Chess.com username или ссылку профиля.");
-    return;
+    showError("Enter a Chess.com username or profile URL.");
+    return false;
   }
   persistUsername(username);
+  persistMaxGames(maxGames);
+  if (el.chesscomMaxGames) {
+    el.chesscomMaxGames.value = String(maxGames);
+  }
 
   setSelectionBusy(true, "Loading...");
-  el.chesscomStatus.textContent = "Загрузка игр...";
+  el.chesscomStatus.textContent = "Loading games...";
 
   try {
     const response = await fetch(
@@ -532,7 +928,7 @@ async function loadChesscomGames() {
     );
     const data = await response.json();
     if (!response.ok) {
-      throw new Error(data.error || "Ошибка загрузки игр.");
+      throw new Error(data.error || "Failed to load games.");
     }
 
     state.chesscomGames = Array.isArray(data.games)
@@ -544,20 +940,37 @@ async function loadChesscomGames() {
       : [];
 
     renderHistoryList();
-    el.chesscomStatus.textContent = `Загружено ${state.chesscomGames.length} игр для ${data.username}.`;
+    el.chesscomStatus.textContent = `Loaded ${state.chesscomGames.length} games for ${data.username}.`;
+    return true;
   } catch (error) {
     showError(error.message);
-    el.chesscomStatus.textContent = "Ошибка загрузки игр.";
+    el.chesscomStatus.textContent = "Failed to load games.";
+    return false;
   } finally {
     setSelectionBusy(false);
   }
+}
+
+async function loadAndAnalyzeChesscomGames() {
+  if (state.analysisBusy || state.massAnalyzeRunning) {
+    return;
+  }
+  const loaded = await loadChesscomGames();
+  if (!loaded) {
+    return;
+  }
+  await analyzeMissingChesscomGames();
 }
 
 async function loadCachedGames() {
   clearError();
   const username = String(el.chesscomUsername.value || "").trim();
   const maxRaw = Number(el.chesscomMaxGames.value || 200);
-  const maxGames = Number.isFinite(maxRaw) ? Math.max(1, Math.min(500, Math.floor(maxRaw))) : 200;
+  const maxGames = Number.isFinite(maxRaw) ? Math.max(1, Math.min(5000, Math.floor(maxRaw))) : 200;
+  persistMaxGames(maxGames);
+  if (el.chesscomMaxGames) {
+    el.chesscomMaxGames.value = String(maxGames);
+  }
   const query = new URLSearchParams();
   query.set("max_games", String(maxGames));
   if (username) {
@@ -568,7 +981,7 @@ async function loadCachedGames() {
     const response = await fetch(`/api/chesscom/cached-games?${query.toString()}`);
     const data = await response.json();
     if (!response.ok) {
-      throw new Error(data.error || "Ошибка загрузки локальной истории.");
+      throw new Error(data.error || "Failed to load local history.");
     }
 
     state.chesscomGames = Array.isArray(data.games)
@@ -581,9 +994,9 @@ async function loadCachedGames() {
 
     renderHistoryList();
     if (state.chesscomGames.length) {
-      el.chesscomStatus.textContent = `История из кэша: ${state.chesscomGames.length} игр.`;
+      el.chesscomStatus.textContent = `Cached history: ${state.chesscomGames.length} games.`;
     } else {
-      el.chesscomStatus.textContent = "Кэш пуст. Нажмите загрузить игры.";
+      el.chesscomStatus.textContent = "Cache is empty. Click Load.";
     }
   } catch (error) {
     showError(error.message);
@@ -724,7 +1137,7 @@ function renderMoveCell(entry) {
 
 function renderMoveList() {
   if (!state.analysis) {
-    el.moveList.innerHTML = "<div class='history-empty'>Выберите игру для анализа.</div>";
+    el.moveList.innerHTML = "<div class='history-empty'>Select a game to analyze.</div>";
     return;
   }
 
@@ -732,7 +1145,7 @@ function renderMoveList() {
     .map((row, idx) => ({ row, idx }))
     .filter(({ row }) => rowMatchesCategory(row));
   if (!rows.length && !(state.manualLine && state.selectedCategory === "All")) {
-    el.moveList.innerHTML = "<div class='history-empty'>Нет ходов для выбранной категории.</div>";
+    el.moveList.innerHTML = "<div class='history-empty'>No moves for the selected category.</div>";
     return;
   }
 
@@ -798,9 +1211,10 @@ function renderMoveList() {
         selectMoveByPly(ply);
         return;
       }
+      // For opponent moves, show position before the move so engine arrows explain that move.
       state.selectedPly = ply;
       state.selectedVariationIndex = null;
-      goToPly(ply);
+      goToPly(Math.max(0, ply - 1));
       renderMoveList();
       renderAccuracyChart();
     });
@@ -832,7 +1246,7 @@ function selectVariationMove(index) {
   state.currentPly = -1;
   state.chess = createChess(move.fenAfter);
   state.board.position(move.fenAfter, false);
-  setStatus(`Вариант: ${variationMoveLabel(move)}`);
+  setStatus(`Variation: ${variationMoveLabel(move)}`);
   renderMoveList();
   renderAccuracyChart();
   scheduleLivePositionAnalysis(80);
@@ -849,8 +1263,8 @@ function renderHighlightsMeta() {
   }
 
   const side = analysisSide();
-  el.highlightPlayer.textContent = side === "white" ? "Белые" : "Черные";
-  el.highlightOpponent.textContent = side === "white" ? "Черные" : "Белые";
+  el.highlightPlayer.textContent = side === "white" ? "White" : "Black";
+  el.highlightOpponent.textContent = side === "white" ? "Black" : "White";
 
   const accuracy = state.analysis.overall_accuracy;
   el.highlightPlayerAccuracy.textContent = typeof accuracy === "number" ? accuracy.toFixed(1) : "-";
@@ -1027,7 +1441,7 @@ function jumpToChartPly(ply) {
 function renderAccuracyChart() {
   const points = chartPointsFromAnalysis();
   if (!state.analysis || !points.length) {
-    el.accuracyChart.innerHTML = "<div class='history-empty'>График появится после анализа.</div>";
+    el.accuracyChart.innerHTML = "<div class='history-empty'>The chart will appear after analysis.</div>";
     return;
   }
 
@@ -1055,7 +1469,7 @@ function renderAccuracyChart() {
     const playerCp = side === "white" ? cpWhite : -cpWhite;
     const playerMate = mateWhite === null ? null : (side === "white" ? mateWhite : -mateWhite);
     const normalized = normalizedEvalForDisplay(playerCp, playerMate);
-    const y = midY + normalized * (plotHeight / 2);
+    const y = midY - normalized * (plotHeight / 2);
     return { ...point, x, y, cpWhite, mateWhite, playerCp, playerMate, normalized };
   };
   const prepared = points
@@ -1705,7 +2119,7 @@ function commitAppliedMove(move, beforeFen, beforePly) {
     state.currentPly = beforePly + 1;
     state.selectedVariationIndex = null;
     state.selectedPly = null;
-    setStatus(`Позиция по партии: полуход ${state.currentPly}/${state.analysis.mainline_uci.length}`);
+    setStatus(`Game position: ply ${state.currentPly}/${state.analysis.mainline_uci.length}`);
   } else {
     const canAppendToCurrentVariation = Boolean(
       state.manualLine &&
@@ -1734,7 +2148,7 @@ function commitAppliedMove(move, beforeFen, beforePly) {
     state.selectedPly = null;
     state.currentPly = -1;
     state.selectedVariationIndex = state.manualLine.moves.length - 1;
-    setStatus(`Вариант: ${variationMoveLabel(state.manualLine.moves[state.selectedVariationIndex])}`);
+    setStatus(`Variation: ${variationMoveLabel(state.manualLine.moves[state.selectedVariationIndex])}`);
   }
 
   renderMoveList();
@@ -1757,6 +2171,7 @@ function initBoard() {
   state.chess = createChess();
   state.board = Chessboard("board", {
     draggable: true,
+    moveSpeed: BOARD_MOVE_ANIMATION_MS,
     pieceTheme: "/static/vendor/chessboard/img/chesspieces/wikipedia/{piece}.png",
     position: "start",
     onDragStart(source, piece) {
@@ -1807,13 +2222,13 @@ function ensureBoardReady() {
   }
   const missing = missingBoardLibs();
   if (missing.length) {
-    showError(`Не удалось загрузить библиотеки доски: ${missing.join(", ")}.`);
+    showError(`Failed to load board libraries: ${missing.join(", ")}.`);
     return false;
   }
   try {
     return initBoard();
   } catch (error) {
-    showError(`Ошибка инициализации доски: ${error.message}`);
+    showError(`Board initialization error: ${error.message}`);
     return false;
   }
 }
@@ -1840,7 +2255,7 @@ function applyUciMove(chess, uci) {
 function renderSuggestionLines(topMoves, turnSide = analysisSide()) {
   const lines = (Array.isArray(topMoves) ? topMoves : []).slice(0, 3);
   if (!lines.length) {
-    return "<div class='suggestion-empty'>Нет данных.</div>";
+    return "<div class='suggestion-empty'>No data.</div>";
   }
 
   return `
@@ -1887,7 +2302,7 @@ function bindSuggestionMoveButtons() {
 
 function renderStoredMoveSuggestion(move) {
   if (!move) {
-    el.suggestions.textContent = "Нет рекомендаций для выбранной позиции.";
+    el.suggestions.textContent = "No recommendations for the selected position.";
     return;
   }
 
@@ -1895,8 +2310,8 @@ function renderStoredMoveSuggestion(move) {
   const lossPoints = cpLoss === null ? "-" : (cpLoss / 100).toFixed(2);
   const turnSide = move.side === "black" ? "black" : move.side === "white" ? "white" : analysisSide();
   el.suggestions.innerHTML = `
-    <div class="suggestion-title">Рекомендация перед #${move.ply} ${escapeHtml(move.san || "")}</div>
-    <div class="suggestion-sub">Лучший: <strong>${escapeHtml(move.best_move_san || "-")}</strong> | Потеря: ${lossPoints}</div>
+    <div class="suggestion-title">Recommendation before #${move.ply} ${escapeHtml(move.san || "")}</div>
+    <div class="suggestion-sub">Best: <strong>${escapeHtml(move.best_move_san || "-")}</strong> | Loss: ${lossPoints}</div>
     ${renderSuggestionLines(move.top_moves, turnSide)}
   `;
   bindSuggestionMoveButtons();
@@ -1917,18 +2332,27 @@ function applySuggestedMove(uci, sanLabel) {
   const beforePly = Number(state.currentPly);
   const move = state.chess.move(moveObj);
   if (!move) {
-    setStatus(`Ход ${sanLabel || uci} недоступен в текущей позиции.`);
+    setStatus(`Move ${sanLabel || uci} is not legal in the current position.`);
     return;
   }
   commitAppliedMove(move, beforeFen, beforePly);
 }
 
-function goToPly(ply) {
+function goToPly(ply, options = {}) {
   if (!state.analysis || !ensureBoardReady()) {
     return;
   }
+  if (state.liveAnalyzeTimer) {
+    clearTimeout(state.liveAnalyzeTimer);
+    state.liveAnalyzeTimer = null;
+  }
+  state.liveAnalyzeToken += 1;
   clearBoardMoveHints();
   const safePly = Math.max(0, Math.min(ply, state.analysis.mainline_uci.length));
+  const previousPly = Number.isFinite(state.currentPly) ? state.currentPly : null;
+  const explicitAnimate = typeof options.animate === "boolean" ? options.animate : null;
+  const stepAnimation = previousPly !== null && previousPly >= 0 && Math.abs(safePly - previousPly) === 1;
+  const useAnimation = explicitAnimate !== null ? explicitAnimate : stepAnimation;
   state.chess = createChess(state.analysis.start_fen);
   for (let i = 0; i < safePly; i += 1) {
     if (!applyUciMove(state.chess, state.analysis.mainline_uci[i])) {
@@ -1936,8 +2360,8 @@ function goToPly(ply) {
     }
   }
   state.currentPly = safePly;
-  state.board.position(state.chess.fen(), false);
-  setStatus(`Позиция по партии: полуход ${safePly}/${state.analysis.mainline_uci.length}`);
+  state.board.position(state.chess.fen(), useAnimation);
+  setStatus(`Game position: ply ${safePly}/${state.analysis.mainline_uci.length}`);
   updateEvalScaleFromPly(safePly);
   state.selectedVariationIndex = null;
   const nextPlayerMove = state.playerMoveByPly.get(safePly + 1);
@@ -1946,9 +2370,119 @@ function goToPly(ply) {
     renderStoredMoveSuggestion(nextPlayerMove);
   } else {
     setArrows([]);
-    el.suggestions.textContent = "Выбран ход соперника. Для рекомендаций выберите ход своей стороны.";
+    el.suggestions.textContent = "Opponent recommendations are loading...";
+    scheduleLivePositionAnalysis(70);
   }
-  requestAnimationFrame(drawArrows);
+  if (useAnimation) {
+    window.setTimeout(() => {
+      requestAnimationFrame(drawArrows);
+    }, BOARD_MOVE_ANIMATION_MS + 24);
+  } else {
+    requestAnimationFrame(drawArrows);
+  }
+}
+
+function animateBoardStep(move) {
+  if (!state.board || typeof state.board.move !== "function" || !move) {
+    return false;
+  }
+  const from = String(move.from || "");
+  const to = String(move.to || "");
+  if (!from || !to) {
+    return false;
+  }
+
+  const flags = String(move.flags || "");
+  const isPromotion = Boolean(move.promotion);
+  const isEnPassant = flags.includes("e");
+  if (isPromotion || isEnPassant) {
+    return false;
+  }
+
+  if (flags.includes("k") || flags.includes("q")) {
+    const moveList = [`${from}-${to}`];
+    const isBlack = String(move.color || "w").toLowerCase() === "b";
+    if (flags.includes("k")) {
+      moveList.push(isBlack ? "h8-f8" : "h1-f1");
+    } else {
+      moveList.push(isBlack ? "a8-d8" : "a1-d1");
+    }
+    state.board.move(...moveList);
+    return true;
+  }
+
+  state.board.move(`${from}-${to}`);
+  return true;
+}
+
+function stepForwardOnePly() {
+  if (!state.analysis || !ensureBoardReady()) {
+    return false;
+  }
+  if (!Number.isFinite(state.currentPly) || state.currentPly < 0) {
+    return false;
+  }
+  if (state.currentPly >= state.analysis.mainline_uci.length) {
+    return false;
+  }
+
+  if (!state.chess) {
+    state.chess = createChess(state.analysis.start_fen);
+    for (let i = 0; i < state.currentPly; i += 1) {
+      if (!applyUciMove(state.chess, state.analysis.mainline_uci[i])) {
+        break;
+      }
+    }
+  }
+
+  if (state.liveAnalyzeTimer) {
+    clearTimeout(state.liveAnalyzeTimer);
+    state.liveAnalyzeTimer = null;
+  }
+  state.liveAnalyzeToken += 1;
+  clearBoardMoveHints();
+
+  const moveUci = state.analysis.mainline_uci[state.currentPly];
+  const moveObj = uciToMoveObj(moveUci);
+  if (!moveObj) {
+    return false;
+  }
+  const appliedMove = state.chess.move(moveObj);
+  if (!appliedMove) {
+    return false;
+  }
+
+  const animated = animateBoardStep(appliedMove);
+  if (!animated) {
+    state.board.position(state.chess.fen(), true);
+  }
+
+  state.currentPly += 1;
+  const safePly = state.currentPly;
+  setStatus(`Game position: ply ${safePly}/${state.analysis.mainline_uci.length}`);
+  updateEvalScaleFromPly(safePly);
+  state.selectedVariationIndex = null;
+
+  const nextPlayerMove = state.playerMoveByPly.get(safePly + 1);
+  if (nextPlayerMove) {
+    setArrows(nextPlayerMove.recommended_arrows || []);
+    renderStoredMoveSuggestion(nextPlayerMove);
+  } else {
+    setArrows([]);
+    el.suggestions.textContent = "Opponent recommendations are loading...";
+    scheduleLivePositionAnalysis(70);
+  }
+
+  renderMoveList();
+  renderAccuracyChart();
+
+  window.setTimeout(() => {
+    requestAnimationFrame(drawArrows);
+    // Keep board state exact after special moves/animations.
+    state.board.position(state.chess.fen(), false);
+  }, BOARD_MOVE_ANIMATION_MS + 24);
+
+  return true;
 }
 
 function setArrows(arrows) {
@@ -1977,7 +2511,7 @@ function selectMoveByPly(ply) {
 function renderCurrentSuggestions(data) {
   const turnSide = data && data.turn === "black" ? "black" : "white";
   el.suggestions.innerHTML = `
-    <div class="suggestion-title">Лучшие линии для текущей позиции</div>
+    <div class="suggestion-title">Best lines for the current position</div>
     ${renderSuggestionLines(data.top_moves, turnSide)}
   `;
   bindSuggestionMoveButtons();
@@ -2009,7 +2543,7 @@ function openAnalysisView(data, sourceLabel) {
       ])
   );
 
-  el.analysisGameTitle.textContent = "Анализ партии";
+  el.analysisGameTitle.textContent = "Game Analysis";
   el.analysisSourceMeta.textContent = sourceLabel;
 
   renderSummary();
@@ -2038,7 +2572,7 @@ async function analyzeChesscomGame(gameId, side, buttonEl) {
   buttonEl.disabled = true;
   buttonEl.textContent = "Analyzing...";
   if (el.chesscomStatus) {
-    el.chesscomStatus.textContent = "Идет анализ партии. Цель: около 1 минуты.";
+    el.chesscomStatus.textContent = "Game analysis is running. Target: about 1 minute.";
   }
 
   if (side === "white" || side === "black") {
@@ -2046,26 +2580,7 @@ async function analyzeChesscomGame(gameId, side, buttonEl) {
   }
 
   try {
-    const timeoutMs = analysisRequestTimeoutMs();
-    const payload = {
-      game_id: gameId,
-      side: el.side.value,
-      depth: analysisDepthValue(),
-      threads: analysisThreadsValue(),
-      hash_mb: analysisHashValue(),
-      target_time_sec: analysisTargetTimeValue(),
-      pv_plies: Number(el.pvPlies.value || 3)
-    };
-
-    const response = await fetchWithTimeout("/api/chesscom/analyze-game", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    }, timeoutMs);
-    const data = await response.json();
-    if (!response.ok) {
-      throw new Error(data.error || "Ошибка анализа выбранной игры.");
-    }
+    const data = await analyzeChesscomGameRequest(gameId, el.side.value);
 
     updateGameStatsAfterAnalysis(gameId, data);
     renderHistoryList();
@@ -2074,7 +2589,7 @@ async function analyzeChesscomGame(gameId, side, buttonEl) {
     openAnalysisView(data, sourceText);
   } catch (error) {
     if (error && error.name === "AbortError") {
-      showError("Анализ занял слишком много времени. Попробуйте снова через несколько секунд.");
+      showError("Analysis took too long. Try again in a few seconds.");
     } else {
       showError(error.message);
     }
@@ -2105,10 +2620,10 @@ function buildPgnFormData({ textOnly }) {
   }
 
   if (textOnly && !textValue) {
-    throw new Error("Вставьте PGN текст для анализа.");
+    throw new Error("Paste PGN text to analyze.");
   }
   if (!textValue && !fileValue) {
-    throw new Error("Выберите PGN файл или вставьте PGN текст.");
+    throw new Error("Select a PGN file or paste PGN text.");
   }
 
   return formData;
@@ -2128,13 +2643,13 @@ async function runPgnAnalyze({ textOnly, sourceLabel }) {
     }, timeoutMs);
     const data = await response.json();
     if (!response.ok) {
-      throw new Error(data.error || "Ошибка анализа PGN.");
+      throw new Error(data.error || "PGN analysis failed.");
     }
 
     openAnalysisView(data, sourceLabel);
   } catch (error) {
     if (error && error.name === "AbortError") {
-      showError("Анализ PGN занял слишком много времени. Попробуйте снова через несколько секунд.");
+      showError("PGN analysis took too long. Try again in a few seconds.");
     } else {
       showError(error.message);
     }
@@ -2148,11 +2663,11 @@ async function pasteAndAnalyze() {
   clearError();
   try {
     if (!navigator.clipboard || typeof navigator.clipboard.readText !== "function") {
-      throw new Error("Браузер не поддерживает чтение буфера обмена.");
+      throw new Error("Browser does not support clipboard reading.");
     }
     const text = await navigator.clipboard.readText();
     if (!String(text || "").trim()) {
-      throw new Error("Буфер обмена пуст или не содержит PGN.");
+      throw new Error("Clipboard is empty or does not contain PGN.");
     }
     el.pgnText.value = String(text).trim();
     await runPgnAnalyze({ textOnly: true, sourceLabel: "PGN Clipboard" });
@@ -2190,7 +2705,7 @@ async function analyzeCurrentPosition(options = {}) {
     });
     const data = await response.json();
     if (!response.ok) {
-      throw new Error(data.error || "Ошибка анализа позиции.");
+      throw new Error(data.error || "Position analysis failed.");
     }
     if (token !== state.liveAnalyzeToken) {
       return;
@@ -2209,7 +2724,7 @@ async function analyzeCurrentPosition(options = {}) {
     if (state.currentPly < 0) {
       const cp = Number(cpWhite);
       if (Number.isFinite(cp)) {
-        setStatus(`Свободный анализ: оценка ${cp >= 0 ? "+" : ""}${(cp / 100).toFixed(2)}.`);
+        setStatus(`Free analysis: eval ${cp >= 0 ? "+" : ""}${(cp / 100).toFixed(2)}.`);
       }
     }
   } catch (error) {
@@ -2221,9 +2736,43 @@ async function analyzeCurrentPosition(options = {}) {
 
 function bindEvents() {
   el.chesscomLoadBtn.addEventListener("click", loadChesscomGames);
+  if (el.chesscomLoadAnalyzeBtn) {
+    el.chesscomLoadAnalyzeBtn.addEventListener("click", loadAndAnalyzeChesscomGames);
+  }
+  if (el.analyzeMissingBtn) {
+    el.analyzeMissingBtn.addEventListener("click", analyzeMissingChesscomGames);
+  }
+  if (el.reanalyzeAllBtn) {
+    el.reanalyzeAllBtn.addEventListener("click", reanalyzeAllChesscomGames);
+  }
+  if (el.openStatsBtn) {
+    el.openStatsBtn.addEventListener("click", () => {
+      const username = String((el.chesscomUsername && el.chesscomUsername.value) || "").trim();
+      const maxGamesRaw = Number((el.chesscomMaxGames && el.chesscomMaxGames.value) || 5000);
+      const maxGames = Number.isFinite(maxGamesRaw) ? Math.max(1, Math.min(5000, Math.floor(maxGamesRaw))) : 5000;
+      persistMaxGames(maxGames);
+      if (username) {
+        persistUsername(username);
+      }
+      const query = new URLSearchParams();
+      if (username) {
+        query.set("username", username);
+      }
+      query.set("max_games", String(maxGames));
+      window.location.href = `/stats?${query.toString()}`;
+    });
+  }
   if (el.chesscomUsername) {
     el.chesscomUsername.addEventListener("change", () => {
       persistUsername(el.chesscomUsername.value);
+    });
+  }
+  if (el.chesscomMaxGames) {
+    el.chesscomMaxGames.addEventListener("change", () => {
+      const value = Number(el.chesscomMaxGames.value || 25);
+      const normalized = Number.isFinite(value) ? Math.max(1, Math.min(5000, Math.floor(value))) : 25;
+      el.chesscomMaxGames.value = String(normalized);
+      persistMaxGames(normalized);
     });
   }
   el.analyzeFileBtn.addEventListener("click", async () => {
@@ -2269,9 +2818,11 @@ function bindEvents() {
     }
     state.selectedPly = null;
     state.selectedVariationIndex = null;
-    goToPly(state.currentPly + 1);
-    renderMoveList();
-    renderAccuracyChart();
+    if (!stepForwardOnePly()) {
+      goToPly(state.currentPly + 1);
+      renderMoveList();
+      renderAccuracyChart();
+    }
   });
 
   el.btnEnd.addEventListener("click", () => {
@@ -2305,6 +2856,12 @@ function init() {
       el.chesscomUsername.value = savedUsername;
     }
   }
+  if (el.chesscomMaxGames) {
+    const savedMaxGames = readStoredMaxGames();
+    if (savedMaxGames !== null) {
+      el.chesscomMaxGames.value = String(savedMaxGames);
+    }
+  }
   if (el.threads) {
     const defaultThreads = defaultThreadsForAnalysis();
     el.threads.value = String(defaultThreads);
@@ -2331,3 +2888,4 @@ function init() {
 }
 
 init();
+

@@ -14,6 +14,7 @@ logs/
 bin/stockfish.exe
 bin/stockfish.zip
 bin/stockfish_unpack/
+static/vendor/chessjs/chess.min.js
 
 # OS/editor noise
 .DS_Store
@@ -21,3 +22,6 @@ Thumbs.db
 
 # Reference exports
 *.mhtml
+
+# Local tooling
+.tools/

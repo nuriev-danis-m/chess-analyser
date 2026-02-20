@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chess Statistics</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&family=Manrope:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260216-13') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='stats.css', v='20260216-14') }}">
+</head>
+<body>
+  <div class="app-bg"></div>
+  <main class="app-shell stats-shell">
+    <header class="panel stats-header">
+      <div class="stats-title-wrap">
+        <h1>Game Statistics</h1>
+        <p>Openings plus sections 2, 4, 6, 7, and 8 across your loaded and analyzed games.</p>
+      </div>
+      <a class="back-link" href="/">← Back to games</a>
+    </header>
+
+    <section class="panel stats-controls">
+      <div class="tool-row stats-control-row">
+        <input id="stats-username" type="text" placeholder="username or profile URL">
+        <input id="stats-max-games" type="number" min="1" max="5000" value="5000">
+        <button id="btn-load-stats" type="button">Refresh stats</button>
+        <button id="btn-reanalyze-all-stats" type="button">Reanalyze all</button>
+      </div>
+      <div id="stats-status" class="status-line">Loading statistics...</div>
+    </section>
+
+    <section class="panel stats-panel">
+      <h2>Openings: where I lose more often</h2>
+      <div id="stats-openings" class="stats-table-wrap">
+        <div class="history-empty">No data.</div>
+      </div>
+    </section>
+
+    <section class="panel stats-panel">
+      <h2>2. Game phases</h2>
+      <div id="stats-phases" class="stats-table-wrap">
+        <div class="history-empty">No data.</div>
+      </div>
+    </section>
+
+    <section class="panel stats-panel">
+      <h2>4. Falling moves (top by cp_loss)</h2>
+      <div id="stats-falling" class="stats-table-wrap">
+        <div class="history-empty">No data.</div>
+      </div>
+    </section>
+
+    <section class="panel stats-panel">
+      <h2>6. Weak pieces</h2>
+      <div id="stats-pieces" class="stats-table-wrap">
+        <div class="history-empty">No data.</div>
+      </div>
+    </section>
+
+    <section class="panel stats-panel">
+      <h2>7. Tactics</h2>
+      <div id="stats-tactics" class="stats-table-wrap">
+        <div class="history-empty">No data.</div>
+      </div>
+    </section>
+
+    <section class="panel stats-panel">
+      <h2>8. Playing with an advantage</h2>
+      <div id="stats-advantage" class="stats-table-wrap">
+        <div class="history-empty">No data.</div>
+      </div>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='stats.js', v='20260216-14') }}"></script>
+</body>
+</html>

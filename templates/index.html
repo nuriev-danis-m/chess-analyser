@@ -1,5 +1,5 @@
 ﻿<!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -7,8 +7,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&family=Manrope:wght@400;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='vendor/chessboard/chessboard-1.0.0.min.css', v='20260216-01') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260216-01') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='vendor/chessboard/chessboard-1.0.0.min.css', v='20260216-09') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260216-13') }}">
 </head>
 <body>
   <div class="app-bg"></div>
@@ -18,102 +18,114 @@
     <section id="selection-view" class="view">
       <header class="view-header">
         <h1>Game History</h1>
-        <p>Выберите игру из Chess.com или загрузите PGN. Анализ открывается только для одной выбранной партии.</p>
+        <p>Select a game from Chess.com or load a PGN. Analysis opens for one selected game.</p>
       </header>
 
-      <section class="panel selector-panel">
-        <div class="source-block">
-          <h2>Chess.com</h2>
-          <div class="tool-row">
-            <input id="chesscom-username" type="text" placeholder="username или ссылка профиля">
-            <input id="chesscom-max-games" type="number" min="1" max="100" value="25">
-            <button id="btn-load-chesscom" type="button">Загрузить игры</button>
-          </div>
-          <div id="chesscom-status" class="status-line">Введите username и нажмите загрузить.</div>
+      <div class="selection-layout">
+        <div class="selection-main">
+          <section class="panel overview-panel">
+            <div class="overview-title">Overall Chart: Rating and Accuracy</div>
+            <div id="overview-chart" class="overview-chart">
+              <div class="history-empty">Load games to build the chart.</div>
+            </div>
+          </section>
+
+          <section class="panel history-panel">
+            <div class="history-head">
+              <div>Players</div>
+              <div>Result</div>
+              <div>Accuracy</div>
+              <div>Moves</div>
+              <div>Date</div>
+              <div></div>
+            </div>
+            <div id="chesscom-games" class="history-list"></div>
+          </section>
         </div>
 
-        <details class="source-block collapsible-block" id="pgn-panel">
-          <summary>PGN</summary>
-          <div class="tool-row pgn-input-row">
-            <input id="pgn-file" type="file" accept=".pgn">
-            <button id="btn-analyze-file" type="button">Анализировать файл</button>
-            <button id="btn-paste-analyze" type="button">Вставить из буфера</button>
-          </div>
-          <textarea id="pgn-text" rows="6" placeholder="Вставьте PGN текст"></textarea>
-          <div class="tool-row pgn-action-row">
-            <button id="btn-analyze-text" type="button">Анализировать вставленный PGN</button>
-          </div>
-        </details>
+        <aside class="selection-sidebar">
+          <section class="panel selector-panel">
+            <div class="source-block">
+              <h2>Chess.com</h2>
+              <div class="tool-row chesscom-load-row">
+                <input id="chesscom-username" type="text" placeholder="username or profile URL">
+                <input id="chesscom-max-games" type="number" min="1" max="5000" value="25">
+                <button id="btn-load-chesscom-analyze" type="button">Load and analyze</button>
+                <button id="btn-load-chesscom" type="button">Load</button>
+              </div>
+              <div id="chesscom-status" class="status-line">Enter a username and click Load.</div>
+              <div class="tool-row tri-action-row">
+                <button id="btn-analyze-missing" type="button">Analyze unanalyzed</button>
+                <button id="btn-reanalyze-all" type="button">Reanalyze all</button>
+                <button id="btn-open-stats" type="button">Stats tab</button>
+              </div>
+            </div>
 
-        <details class="source-block collapsible-block" id="analysis-settings">
-          <summary>Параметры анализа</summary>
-          <div class="tool-row analysis-settings-row">
-            <label class="setting-field" for="side">
-              <span class="setting-name">Сторона</span>
-              <select id="side">
-                <option value="white">White</option>
-                <option value="black">Black</option>
-              </select>
-              <small>Для кого считаются accuracy и категории ошибок.</small>
-            </label>
-            <label class="setting-field" for="depth">
-              <span class="setting-name">Depth</span>
-              <input id="depth" type="number" min="6" max="40" value="14" placeholder="Depth">
-              <small>Глубина поиска: выше точнее, но медленнее.</small>
-            </label>
-            <label class="setting-field" for="threads">
-              <span class="setting-name">Процессы</span>
-              <input id="threads" type="number" min="1" max="64" value="4" placeholder="Процессы">
-              <small>Сколько потоков CPU выделять движку.</small>
-            </label>
-            <label class="setting-field" for="hash-mb">
-              <span class="setting-name">Память MB</span>
-              <input id="hash-mb" type="number" min="64" max="8192" value="1024" placeholder="Память MB">
-              <small>Hash-кэш позиций для Stockfish.</small>
-            </label>
-            <label class="setting-field" for="target-time">
-              <span class="setting-name">Лимит сек</span>
-              <input id="target-time" type="number" min="20" max="300" value="60" placeholder="Лимит сек">
-              <small>Целевое время на анализ всей партии.</small>
-            </label>
-            <label class="setting-field" for="pv-plies">
-              <span class="setting-name">PV</span>
-              <select id="pv-plies">
-                <option value="2">PV 2</option>
-                <option value="3" selected>PV 3</option>
-              </select>
-              <small>Длина рекомендованной линии/стрелок.</small>
-            </label>
-          </div>
-          <div class="settings-hint">Быстрый режим: Depth 12-14, Процессы 4-8, Память 512-1024 MB, Лимит 60 сек.</div>
-        </details>
-      </section>
+            <details class="source-block collapsible-block" id="analysis-settings">
+              <summary>Analysis settings</summary>
+              <div class="tool-row analysis-settings-row">
+                <label class="setting-field" for="side">
+                  <span class="setting-name">Side</span>
+                  <select id="side">
+                    <option value="white">White</option>
+                    <option value="black">Black</option>
+                  </select>
+                  <small>Which side the accuracy and move categories are computed for.</small>
+                </label>
+                <label class="setting-field" for="depth">
+                  <span class="setting-name">Depth</span>
+                  <input id="depth" type="number" min="6" max="40" value="14" placeholder="Depth">
+                  <small>Search depth: higher is more accurate but slower.</small>
+                </label>
+                <label class="setting-field" for="threads">
+                  <span class="setting-name">Threads</span>
+                  <input id="threads" type="number" min="1" max="64" value="4" placeholder="Threads">
+                  <small>How many CPU threads to allocate to Stockfish.</small>
+                </label>
+                <label class="setting-field" for="hash-mb">
+                  <span class="setting-name">Memory MB</span>
+                  <input id="hash-mb" type="number" min="64" max="8192" value="1024" placeholder="Memory MB">
+                  <small>Stockfish hash cache size.</small>
+                </label>
+                <label class="setting-field" for="target-time">
+                  <span class="setting-name">Time limit sec</span>
+                  <input id="target-time" type="number" min="20" max="300" value="60" placeholder="Time limit sec">
+                  <small>Target time budget for whole-game analysis.</small>
+                </label>
+                <label class="setting-field" for="pv-plies">
+                  <span class="setting-name">PV</span>
+                  <select id="pv-plies">
+                    <option value="2">PV 2</option>
+                    <option value="3" selected>PV 3</option>
+                  </select>
+                  <small>Recommended line/arrow length.</small>
+                </label>
+              </div>
+              <div class="settings-hint">Fast mode: Depth 12-14, Threads 4-8, Memory 512-1024 MB, Time limit 60 sec.</div>
+            </details>
 
-      <section class="panel overview-panel">
-        <div class="overview-title">Общий график: рейтинг и accuracy</div>
-        <div id="overview-chart" class="overview-chart">
-          <div class="history-empty">Загрузите игры для построения графика.</div>
-        </div>
-      </section>
-
-      <section class="panel history-panel">
-        <div class="history-head">
-          <div>Players</div>
-          <div>Result</div>
-          <div>Accuracy</div>
-          <div>Moves</div>
-          <div>Date</div>
-          <div></div>
-        </div>
-        <div id="chesscom-games" class="history-list"></div>
-      </section>
+            <details class="source-block collapsible-block" id="pgn-panel">
+              <summary>PGN</summary>
+              <div class="tool-row pgn-input-row">
+                <input id="pgn-file" type="file" accept=".pgn">
+                <button id="btn-analyze-file" type="button">Analyze file</button>
+                <button id="btn-paste-analyze" type="button">Paste from clipboard</button>
+              </div>
+              <textarea id="pgn-text" rows="6" placeholder="Paste PGN text"></textarea>
+              <div class="tool-row pgn-action-row">
+                <button id="btn-analyze-text" type="button">Analyze pasted PGN</button>
+              </div>
+            </details>
+          </section>
+        </aside>
+      </div>
     </section>
 
     <section id="analysis-view" class="view hidden">
       <header class="analysis-header panel">
-        <button id="btn-back-selection" type="button">← К выбору игр</button>
+        <button id="btn-back-selection" type="button">← Back to games</button>
         <div class="analysis-meta">
-          <h2 id="analysis-game-title">Анализ партии</h2>
+          <h2 id="analysis-game-title">Game analysis</h2>
           <p id="analysis-source-meta">-</p>
         </div>
         <div class="analysis-stats">
@@ -149,11 +161,10 @@
               <svg id="arrow-layer" aria-hidden="true"></svg>
             </div>
           </div>
-          <div id="board-status" class="status-line">Позиция: стартовая.</div>
+          <div id="board-status" class="status-line">Position: initial.</div>
           <div class="board-highlights">
-            <div class="column-head">Highlights</div>
             <div id="accuracy-chart" class="accuracy-chart">
-              <div class="history-empty">График появится после анализа.</div>
+              <div class="history-empty">Chart will appear after analysis.</div>
             </div>
           </div>
         </section>
@@ -164,7 +175,7 @@
             <div class="moves-column">
               <div class="column-head">Moves</div>
               <div class="moves-filter">
-                <label class="filter-label" for="category-filter">Категория</label>
+                <label class="filter-label" for="category-filter">Category</label>
                 <select id="category-filter"></select>
               </div>
               <div id="category-chips" class="chips"></div>
@@ -175,12 +186,12 @@
               <div class="column-head">Highlights Summary</div>
               <div class="players-head">
                 <div>
-                  <div class="muted-label">Игрок</div>
+                  <div class="muted-label">Player</div>
                   <div id="highlight-player" class="player-name">-</div>
                   <div id="highlight-player-accuracy" class="accuracy-badge">-</div>
                 </div>
                 <div>
-                  <div class="muted-label">Соперник</div>
+                  <div class="muted-label">Opponent</div>
                   <div id="highlight-opponent" class="player-name">-</div>
                   <div id="highlight-opponent-accuracy" class="accuracy-badge">-</div>
                 </div>
@@ -188,7 +199,7 @@
               <div id="highlights-breakdown" class="highlights-breakdown"></div>
               <div class="suggestion-box">
                 <div class="muted-label">Engine</div>
-                <div id="current-suggestions" class="suggestions">Выберите ход для рекомендаций.</div>
+                <div id="current-suggestions" class="suggestions">Select a move for recommendations.</div>
               </div>
             </div>
           </div>
@@ -207,9 +218,9 @@
   <script>
     window.CATEGORY_ORDER = {{ categories | tojson }};
   </script>
-  <script src="{{ url_for('static', filename='vendor/jquery/jquery-3.6.0.min.js', v='20260216-01') }}"></script>
-  <script src="{{ url_for('static', filename='vendor/chessjs/chess.umd.js', v='20260216-01') }}"></script>
-  <script src="{{ url_for('static', filename='vendor/chessboard/chessboard-1.0.0.min.js', v='20260216-01') }}"></script>
-  <script src="{{ url_for('static', filename='app.js', v='20260216-01') }}"></script>
+  <script src="{{ url_for('static', filename='vendor/jquery/jquery-3.6.0.min.js', v='20260216-09') }}"></script>
+  <script src="{{ url_for('static', filename='vendor/chessjs/chess.umd.js', v='20260216-09') }}"></script>
+  <script src="{{ url_for('static', filename='vendor/chessboard/chessboard-1.0.0.min.js', v='20260216-09') }}"></script>
+  <script src="{{ url_for('static', filename='app.js', v='20260216-14') }}"></script>
 </body>
 </html>
