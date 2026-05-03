@@ -88,6 +88,7 @@ const el = {
   analyzeMissingBtn: document.getElementById("btn-analyze-missing"),
   reanalyzeAllBtn: document.getElementById("btn-reanalyze-all"),
   reanalyzeAllDeeperBtn: document.getElementById("btn-reanalyze-all-deeper"),
+  stopBatchAnalysisBtn: document.getElementById("btn-stop-batch-analysis"),
   clearCacheBtn: document.getElementById("btn-clear-cache"),
   openStatsBtn: document.getElementById("btn-open-stats"),
   openMateHuntBtn: document.getElementById("btn-open-mate-hunt"),
@@ -320,6 +321,9 @@ function setSelectionBusy(isBusy, label) {
   if (el.reanalyzeAllDeeperBtn) {
     el.reanalyzeAllDeeperBtn.disabled = isBusy || state.massAnalyzeRunning;
   }
+  if (el.stopBatchAnalysisBtn) {
+    el.stopBatchAnalysisBtn.disabled = !state.massAnalyzeRunning || isBusy;
+  }
   if (el.clearCacheBtn) {
     el.clearCacheBtn.disabled = isBusy || state.massAnalyzeRunning;
   }
@@ -367,6 +371,9 @@ function setGlobalAnalysisBusy(isBusy) {
   if (el.reanalyzeAllDeeperBtn) {
     el.reanalyzeAllDeeperBtn.disabled = disabled || state.massAnalyzeRunning;
   }
+  if (el.stopBatchAnalysisBtn) {
+    el.stopBatchAnalysisBtn.disabled = !state.massAnalyzeRunning || disabled;
+  }
   if (el.clearCacheBtn) {
     el.clearCacheBtn.disabled = disabled || state.massAnalyzeRunning;
   }
@@ -394,6 +401,12 @@ function setMassAnalyzeRunning(isRunning, label) {
   }
   if (el.clearCacheBtn) {
     el.clearCacheBtn.disabled = state.massAnalyzeRunning || state.analysisBusy;
+  }
+  if (el.stopBatchAnalysisBtn) {
+    el.stopBatchAnalysisBtn.disabled = !state.massAnalyzeRunning || state.analysisBusy;
+    el.stopBatchAnalysisBtn.textContent = state.massAnalyzeRunning && label
+      ? (state.batchJob ? batchStopButtonLabel(state.batchJob) : "Stop analysis")
+      : "Stop analysis";
   }
   if (el.chesscomLoadBtn) {
     el.chesscomLoadBtn.disabled = state.massAnalyzeRunning || state.analysisBusy;
@@ -440,6 +453,12 @@ function batchJobButtonLabel(job) {
   return `${base} ${processed}/${total}`;
 }
 
+function batchStopButtonLabel(job) {
+  return String(job && job.status || "").toLowerCase() === "stopping"
+    ? "Stopping..."
+    : "Stop analysis";
+}
+
 function batchJobStatusLine(job) {
   if (!job || typeof job !== "object") {
     return "";
@@ -448,6 +467,12 @@ function batchJobStatusLine(job) {
   const total = Number(job.total || 0);
   const currentGameId = String(job.current_game_id || "").trim();
   const detail = currentGameId ? ` (game_id=${currentGameId})` : "";
+  if (String(job.status || "").toLowerCase() === "stopping") {
+    return String(job.message || "Stop requested. Waiting for the current game to finish.");
+  }
+  if (String(job.status || "").toLowerCase() === "stopped") {
+    return String(job.message || `${String(job.label || "Batch analysis")} stopped.`);
+  }
   if (batchJobIsActive(job)) {
     return `${String(job.label || "Batch analysis")}: ${processed}/${total}${detail}`;
   }
@@ -481,6 +506,10 @@ function applyPersistentBatchStatus(job, options = {}) {
 
   if (isActive) {
     setMassAnalyzeRunning(true, batchJobButtonLabel(job));
+    if (el.stopBatchAnalysisBtn) {
+      el.stopBatchAnalysisBtn.disabled = false;
+      el.stopBatchAnalysisBtn.textContent = batchStopButtonLabel(job);
+    }
     if (el.chesscomStatus) {
       el.chesscomStatus.textContent = batchJobStatusLine(job);
     }
@@ -490,6 +519,10 @@ function applyPersistentBatchStatus(job, options = {}) {
 
   clearBatchStatusTimer();
   setMassAnalyzeRunning(false);
+  if (el.stopBatchAnalysisBtn) {
+    el.stopBatchAnalysisBtn.disabled = true;
+    el.stopBatchAnalysisBtn.textContent = "Stop analysis";
+  }
   if (job && el.chesscomStatus && !state.analysisBusy) {
     el.chesscomStatus.textContent = batchJobStatusLine(job);
   }
@@ -556,6 +589,30 @@ async function startPersistentBatchAnalysis(mode, options = {}) {
   }
   applyPersistentBatchStatus(data.job || null, { refreshGamesOnFinish: true });
   return Boolean(data.started || data.job);
+}
+
+async function stopPersistentBatchAnalysis() {
+  clearError();
+  const username = currentChesscomUsername();
+  if (!username) {
+    return false;
+  }
+  const payload = {
+    username,
+    max_games: currentChesscomMaxGames(),
+    job_id: state.batchJob && state.batchJob.job_id ? state.batchJob.job_id : ""
+  };
+  const response = await fetch("/api/chesscom/batch-analysis/stop", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.error || "Failed to stop batch analysis.");
+  }
+  applyPersistentBatchStatus(data.job || null, { refreshGamesOnFinish: true });
+  return true;
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 180000) {
@@ -3089,6 +3146,15 @@ function bindEvents() {
   }
   if (el.reanalyzeAllDeeperBtn) {
     el.reanalyzeAllDeeperBtn.addEventListener("click", reanalyzeAllChesscomGamesDeeper);
+  }
+  if (el.stopBatchAnalysisBtn) {
+    el.stopBatchAnalysisBtn.addEventListener("click", async () => {
+      try {
+        await stopPersistentBatchAnalysis();
+      } catch (error) {
+        showError(error.message || "Failed to stop batch analysis.");
+      }
+    });
   }
   if (el.clearCacheBtn) {
     el.clearCacheBtn.addEventListener("click", clearAllCache);

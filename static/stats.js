@@ -12,6 +12,7 @@ const el = {
   maxGames: document.getElementById("stats-max-games"),
   btnLoad: document.getElementById("btn-load-stats"),
   btnReanalyzeAll: document.getElementById("btn-reanalyze-all-stats"),
+  btnStopBatch: document.getElementById("btn-stop-batch-analysis-stats"),
   status: document.getElementById("stats-status"),
   tabButtons: Array.from(document.querySelectorAll("[data-stats-tab]")),
   tabOverview: document.getElementById("stats-tab-overview"),
@@ -138,9 +139,15 @@ function setBusy(isBusy, label) {
   const batchRunning = batchJobIsActive(state.batchJob);
   el.btnLoad.disabled = state.busy || batchRunning;
   el.btnReanalyzeAll.disabled = state.busy || batchRunning;
+  if (el.btnStopBatch) {
+    el.btnStopBatch.disabled = !batchRunning || state.busy;
+  }
   if (!state.busy && !batchRunning) {
     el.btnLoad.textContent = "Refresh stats";
     el.btnReanalyzeAll.textContent = "Reanalyze all";
+    if (el.btnStopBatch) {
+      el.btnStopBatch.textContent = "Stop analysis";
+    }
   } else if (label) {
     el.btnReanalyzeAll.textContent = label;
   }
@@ -162,6 +169,12 @@ function batchJobButtonLabel(job) {
   return `${base} ${processed}/${total}`;
 }
 
+function batchStopButtonLabel(job) {
+  return String(job && job.status || "").toLowerCase() === "stopping"
+    ? "Stopping..."
+    : "Stop analysis";
+}
+
 function batchJobStatusLine(job) {
   if (!job || typeof job !== "object") {
     return "";
@@ -170,6 +183,12 @@ function batchJobStatusLine(job) {
   const total = Number(job.total || 0);
   const currentGameId = String(job.current_game_id || "").trim();
   const detail = currentGameId ? ` (game_id=${currentGameId})` : "";
+  if (String(job.status || "").toLowerCase() === "stopping") {
+    return String(job.message || "Stop requested. Waiting for the current game to finish.");
+  }
+  if (String(job.status || "").toLowerCase() === "stopped") {
+    return String(job.message || `${String(job.label || "Batch analysis")} stopped.`);
+  }
   if (batchJobIsActive(job)) {
     return `${String(job.label || "Batch analysis")}: ${processed}/${total}${detail}`;
   }
@@ -210,12 +229,20 @@ function applyPersistentBatchStatus(job, options = {}) {
   if (isActive) {
     el.status.textContent = batchJobStatusLine(job);
     setBusy(false, batchJobButtonLabel(job));
+    if (el.btnStopBatch) {
+      el.btnStopBatch.disabled = false;
+      el.btnStopBatch.textContent = batchStopButtonLabel(job);
+    }
     scheduleBatchStatusPoll();
     return;
   }
 
   clearBatchStatusTimer();
   setBusy(false);
+  if (el.btnStopBatch) {
+    el.btnStopBatch.disabled = true;
+    el.btnStopBatch.textContent = "Stop analysis";
+  }
   if (job) {
     el.status.textContent = batchJobStatusLine(job);
   }
@@ -238,6 +265,28 @@ async function syncPersistentBatchStatus(options = {}) {
   }
   applyPersistentBatchStatus(data.job || null, options);
   return data.job || null;
+}
+
+async function stopPersistentBatchAnalysis() {
+  const { username, maxGames } = persistInputs();
+  if (!username) {
+    return false;
+  }
+  const response = await fetch("/api/chesscom/batch-analysis/stop", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      username,
+      max_games: maxGames,
+      job_id: state.batchJob && state.batchJob.job_id ? state.batchJob.job_id : ""
+    })
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.error || "Failed to stop batch analysis.");
+  }
+  applyPersistentBatchStatus(data.job || null, { refreshStatsOnFinish: true });
+  return true;
 }
 
 function renderTable(container, columns, rows, emptyLabel, options = {}) {
@@ -1498,6 +1547,15 @@ function init() {
   });
   el.btnLoad.addEventListener("click", loadStats);
   el.btnReanalyzeAll.addEventListener("click", reanalyzeAll);
+  if (el.btnStopBatch) {
+    el.btnStopBatch.addEventListener("click", async () => {
+      try {
+        await stopPersistentBatchAnalysis();
+      } catch (error) {
+        el.status.textContent = error.message || "Failed to stop batch analysis.";
+      }
+    });
+  }
   if (el.btnMateNext) {
     el.btnMateNext.addEventListener("click", () => {
       const nextGame = nextPendingMateGame();

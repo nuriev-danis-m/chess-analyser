@@ -65,7 +65,7 @@
 }
 
 .stats-control-row {
-  grid-template-columns: 2fr 0.8fr 1fr 1.1fr;
+  grid-template-columns: 2fr 0.8fr 1fr 1.1fr 1.1fr;
 }
 
 #btn-reanalyze-all-stats {
@@ -76,6 +76,16 @@
 
 #btn-reanalyze-all-stats:hover {
   background: linear-gradient(180deg, #de9854, #ab6b31);
+}
+
+#btn-stop-batch-analysis-stats {
+  background: linear-gradient(180deg, #8c5a2a, #5f391a);
+  border-color: rgba(236, 186, 112, 0.42);
+  color: #fff6e7;
+}
+
+#btn-stop-batch-analysis-stats:hover {
+  background: linear-gradient(180deg, #9c6731, #6b4120);
 }
 
 .stats-panel {

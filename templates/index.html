@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&family=Manrope:wght@400;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='vendor/chessboard/chessboard-1.0.0.min.css', v='20260216-09') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260503-02') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260504-04') }}">
 </head>
 <body>
   <div class="app-bg"></div>
@@ -58,6 +58,7 @@
                 <button id="btn-analyze-missing" type="button">Analyze unanalyzed</button>
                 <button id="btn-reanalyze-all" type="button">Reanalyze all</button>
                 <button id="btn-reanalyze-all-deeper" type="button">Reanalyze all deeper</button>
+                <button id="btn-stop-batch-analysis" type="button" disabled>Stop analysis</button>
                 <button id="btn-clear-cache" type="button">Clear cache</button>
                 <button id="btn-open-stats" type="button">Stats tab</button>
                 <button id="btn-open-mate-hunt" type="button">Where's my mate?</button>
@@ -220,6 +221,6 @@
   <script src="{{ url_for('static', filename='vendor/jquery/jquery-3.6.0.min.js', v='20260216-09') }}"></script>
   <script src="{{ url_for('static', filename='vendor/chessjs/chess.umd.js', v='20260216-09') }}"></script>
   <script src="{{ url_for('static', filename='vendor/chessboard/chessboard-1.0.0.min.js', v='20260216-09') }}"></script>
-  <script src="{{ url_for('static', filename='app.js', v='20260504-02') }}"></script>
+  <script src="{{ url_for('static', filename='app.js', v='20260504-04') }}"></script>
 </body>
 </html>

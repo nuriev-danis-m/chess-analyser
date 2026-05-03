@@ -207,6 +207,16 @@ body {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+#btn-stop-batch-analysis {
+  background: linear-gradient(180deg, #8c5a2a, #5f391a);
+  border-color: rgba(236, 186, 112, 0.42);
+  color: #fff6e7;
+}
+
+#btn-stop-batch-analysis:hover {
+  background: linear-gradient(180deg, #9c6731, #6b4120);
+}
+
 #btn-clear-cache {
   background: linear-gradient(180deg, #b56245, #7e3d2b);
   border-color: rgba(244, 153, 119, 0.44);

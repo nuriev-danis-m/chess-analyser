@@ -9,7 +9,7 @@
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&family=Manrope:wght@400;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='vendor/chessboard/chessboard-1.0.0.min.css', v='20260216-09') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260216-13') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='stats.css', v='20260503-01') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='stats.css', v='20260504-04') }}">
 </head>
 <body>
   <div class="app-bg"></div>
@@ -28,6 +28,7 @@
         <input id="stats-max-games" type="number" min="1" max="5000" value="5000">
         <button id="btn-load-stats" type="button">Refresh stats</button>
         <button id="btn-reanalyze-all-stats" type="button">Reanalyze all</button>
+        <button id="btn-stop-batch-analysis-stats" type="button" disabled>Stop analysis</button>
       </div>
       <div id="stats-status" class="status-line">Loading statistics...</div>
     </section>
@@ -141,6 +142,6 @@
   <script src="{{ url_for('static', filename='vendor/jquery/jquery-3.6.0.min.js', v='20260216-09') }}"></script>
   <script src="{{ url_for('static', filename='vendor/chessjs/chess.umd.js', v='20260216-09') }}"></script>
   <script src="{{ url_for('static', filename='vendor/chessboard/chessboard-1.0.0.min.js', v='20260216-09') }}"></script>
-  <script src="{{ url_for('static', filename='stats.js', v='20260504-02') }}"></script>
+  <script src="{{ url_for('static', filename='stats.js', v='20260504-04') }}"></script>
 </body>
 </html>

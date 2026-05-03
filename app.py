@@ -588,6 +588,12 @@ def persist_batch_job(job: Dict[str, Any]) -> Dict[str, Any]:
     with STORE_LOCK:
         store = load_batch_analysis_store()
         jobs = store.setdefault("jobs", {})
+        existing = jobs.get(str(snapshot["job_id"]))
+        if isinstance(existing, dict) and existing.get("cancel_requested"):
+            snapshot["cancel_requested"] = True
+            if str(snapshot.get("status", "")).lower() in {"queued", "running", "stopping"}:
+                snapshot["status"] = "stopping"
+                snapshot["message"] = "Stop requested. Waiting for the current game to finish."
         jobs[str(snapshot["job_id"])] = snapshot
         ordered_ids = sorted(
             jobs.keys(),
@@ -597,6 +603,47 @@ def persist_batch_job(job: Dict[str, Any]) -> Dict[str, Any]:
         for stale_id in ordered_ids[jobs_to_keep:]:
             jobs.pop(stale_id, None)
         save_batch_analysis_store(store)
+    return snapshot
+
+
+def load_batch_job_snapshot(job_id: str) -> Optional[Dict[str, Any]]:
+    if not job_id:
+        return None
+    with STORE_LOCK:
+        store = load_batch_analysis_store()
+        payload = (store.get("jobs", {}) or {}).get(job_id)
+    return dict(payload) if isinstance(payload, dict) else None
+
+
+def batch_job_cancel_requested(job_id: str) -> bool:
+    snapshot = load_batch_job_snapshot(job_id)
+    return bool(snapshot and snapshot.get("cancel_requested"))
+
+
+def request_batch_job_cancel(job_id: str) -> Optional[Dict[str, Any]]:
+    if not job_id:
+        return None
+    with STORE_LOCK:
+        store = load_batch_analysis_store()
+        jobs = store.get("jobs", {}) or {}
+        payload = jobs.get(job_id)
+        if not isinstance(payload, dict):
+            return None
+        status = str(payload.get("status", "")).lower()
+        if status not in {"queued", "running", "stopping"}:
+            snapshot = dict(payload)
+            snapshot["active"] = is_batch_job_running(job_id)
+            return snapshot
+
+        payload["cancel_requested"] = True
+        payload["status"] = "stopping"
+        payload["updated_at"] = int(time.time())
+        payload["message"] = "Stop requested. Waiting for the current game to finish."
+        jobs[job_id] = payload
+        save_batch_analysis_store(store)
+
+    snapshot = dict(payload)
+    snapshot["active"] = is_batch_job_running(job_id)
     return snapshot
 
 
@@ -622,7 +669,7 @@ def latest_batch_job_snapshot(username: str, max_games: int) -> Optional[Dict[st
         ),
     )
     status = str(latest.get("status", "")).lower()
-    if status in {"queued", "running"} and not is_batch_job_running(str(latest.get("job_id", ""))):
+    if status in {"queued", "running", "stopping"} and not is_batch_job_running(str(latest.get("job_id", ""))):
         latest["status"] = "interrupted"
         latest["finished_at"] = int(time.time())
         latest["updated_at"] = int(time.time())
@@ -2457,7 +2504,19 @@ def run_chesscom_batch_job(job: Dict[str, Any], queue: List[Dict[str, Any]]) -> 
         job["updated_at"] = int(time.time())
         persist_batch_job(job)
 
-        ANALYSIS_SLOT_LOCK.acquire()
+        while True:
+            if batch_job_cancel_requested(job_id):
+                job["status"] = "stopped"
+                job["active"] = False
+                job["finished_at"] = int(time.time())
+                job["updated_at"] = int(time.time())
+                job["message"] = (
+                    f"{job.get('label', 'Batch analysis')} stopped before the next game started."
+                )
+                persist_batch_job(job)
+                return
+            if ANALYSIS_SLOT_LOCK.acquire(timeout=1):
+                break
         slot_locked = True
 
         job["status"] = "running"
@@ -2466,6 +2525,19 @@ def run_chesscom_batch_job(job: Dict[str, Any], queue: List[Dict[str, Any]]) -> 
         persist_batch_job(job)
 
         for index, game in enumerate(queue, start=1):
+            if batch_job_cancel_requested(job_id):
+                job["status"] = "stopped"
+                job["active"] = False
+                job["finished_at"] = int(time.time())
+                job["updated_at"] = int(time.time())
+                job["message"] = (
+                    f"{job.get('label', 'Batch analysis')} stopped. "
+                    f"Processed: {job.get('processed', 0)}/{job.get('total', len(queue))}."
+                )
+                job["current_game_id"] = ""
+                persist_batch_job(job)
+                return
+
             game_id = str((game or {}).get("game_id", "")).strip()
             side = normalize_side((game or {}).get("player_side", "white"), "white")
             if not game_id:
@@ -2509,6 +2581,18 @@ def run_chesscom_batch_job(job: Dict[str, Any], queue: List[Dict[str, Any]]) -> 
                 job["processed"] = index
                 job["updated_at"] = int(time.time())
                 persist_batch_job(job)
+
+            if batch_job_cancel_requested(job_id):
+                job["status"] = "stopped"
+                job["active"] = False
+                job["finished_at"] = int(time.time())
+                job["updated_at"] = int(time.time())
+                job["message"] = (
+                    f"{job.get('label', 'Batch analysis')} stopped after game {index}/{len(queue)}."
+                )
+                job["current_game_id"] = ""
+                persist_batch_job(job)
+                return
 
         job["current_index"] = int(job.get("total") or len(queue))
         job["current_game_id"] = ""
@@ -2663,6 +2747,30 @@ def chesscom_batch_analysis_start_endpoint():
     except Exception as exc:
         app.logger.exception("Batch analysis start failed")
         return jsonify({"error": f"Batch analysis start failed: {exc}"}), 500
+
+
+@app.post("/api/chesscom/batch-analysis/stop")
+def chesscom_batch_analysis_stop_endpoint():
+    try:
+        payload = request.get_json(silent=True) or {}
+        job_id = str(payload.get("job_id", "")).strip()
+        if not job_id:
+            username = sanitize_username(str(payload.get("username", "")))
+            max_games = clamp(int(payload.get("max_games", 25)), 1, 5000)
+            latest = latest_batch_job_snapshot(username, max_games) if username else None
+            job_id = str((latest or {}).get("job_id", "")).strip()
+        if not job_id:
+            return jsonify({"error": "No batch analysis job was found to stop."}), 404
+
+        job = request_batch_job_cancel(job_id)
+        if not job:
+            return jsonify({"error": "Batch analysis job was not found."}), 404
+        return jsonify({"stopped": True, "job": job})
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid batch stop parameters."}), 400
+    except Exception as exc:
+        app.logger.exception("Batch analysis stop failed")
+        return jsonify({"error": f"Batch analysis stop failed: {exc}"}), 500
 
 
 @app.post("/api/chesscom/analyze-game")
