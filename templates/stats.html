@@ -7,8 +7,9 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&family=Manrope:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='vendor/chessboard/chessboard-1.0.0.min.css', v='20260216-09') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260216-13') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='stats.css', v='20260216-14') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='stats.css', v='20260503-01') }}">
 </head>
 <body>
   <div class="app-bg"></div>
@@ -31,49 +32,115 @@
       <div id="stats-status" class="status-line">Loading statistics...</div>
     </section>
 
-    <section class="panel stats-panel">
-      <h2>Openings: where I lose more often</h2>
-      <div id="stats-openings" class="stats-table-wrap">
-        <div class="history-empty">No data.</div>
-      </div>
+    <section class="panel stats-tabs">
+      <button type="button" class="stats-tab-btn active" data-stats-tab="overview">Game Statistics</button>
+      <button type="button" class="stats-tab-btn" data-stats-tab="mate-hunt">Where's my mate, dude?</button>
     </section>
 
-    <section class="panel stats-panel">
-      <h2>2. Game phases</h2>
-      <div id="stats-phases" class="stats-table-wrap">
-        <div class="history-empty">No data.</div>
-      </div>
-    </section>
+    <div id="stats-tab-overview" class="stats-tab-panel">
+      <section class="panel stats-panel">
+        <h2>Openings: where I lose more often</h2>
+        <div id="stats-openings" class="stats-table-wrap">
+          <div class="history-empty">No data.</div>
+        </div>
+      </section>
 
-    <section class="panel stats-panel">
-      <h2>4. Falling moves (top by cp_loss)</h2>
-      <div id="stats-falling" class="stats-table-wrap">
-        <div class="history-empty">No data.</div>
-      </div>
-    </section>
+      <section class="panel stats-panel">
+        <h2>2. Game phases</h2>
+        <div id="stats-phases" class="stats-table-wrap">
+          <div class="history-empty">No data.</div>
+        </div>
+      </section>
 
-    <section class="panel stats-panel">
-      <h2>6. Weak pieces</h2>
-      <div id="stats-pieces" class="stats-table-wrap">
-        <div class="history-empty">No data.</div>
-      </div>
-    </section>
+      <section class="panel stats-panel">
+        <h2>4. Falling moves (top by cp_loss)</h2>
+        <div id="stats-falling" class="stats-table-wrap">
+          <div class="history-empty">No data.</div>
+        </div>
+      </section>
 
-    <section class="panel stats-panel">
-      <h2>7. Tactics</h2>
-      <div id="stats-tactics" class="stats-table-wrap">
-        <div class="history-empty">No data.</div>
-      </div>
-    </section>
+      <section class="panel stats-panel">
+        <h2>6. Weak pieces</h2>
+        <div id="stats-pieces" class="stats-table-wrap">
+          <div class="history-empty">No data.</div>
+        </div>
+      </section>
 
-    <section class="panel stats-panel">
-      <h2>8. Playing with an advantage</h2>
-      <div id="stats-advantage" class="stats-table-wrap">
-        <div class="history-empty">No data.</div>
-      </div>
-    </section>
+      <section class="panel stats-panel">
+        <h2>7. Tactics</h2>
+        <div id="stats-tactics" class="stats-table-wrap">
+          <div class="history-empty">No data.</div>
+        </div>
+      </section>
+
+      <section class="panel stats-panel">
+        <h2>8. Playing with an advantage</h2>
+        <div id="stats-advantage" class="stats-table-wrap">
+          <div class="history-empty">No data.</div>
+        </div>
+      </section>
+    </div>
+
+    <div id="stats-tab-mate-hunt" class="stats-tab-panel hidden">
+      <section class="panel stats-panel">
+        <h2>Where's my mate, dude?</h2>
+        <p class="stats-panel-copy">Interactive mate trainer built from your own games. It opens the missed finishing position and makes you convert it over the board.</p>
+        <div id="stats-mate-kpis" class="stats-kpi-wrap">
+          <div class="history-empty">No data.</div>
+        </div>
+      </section>
+
+      <section class="panel stats-panel">
+        <div class="mate-play-layout">
+          <div class="mate-board-column">
+            <div id="mate-board-shell" class="mate-board-shell">
+              <div id="mate-board"></div>
+            </div>
+            <div id="mate-toast" class="mate-toast hidden"></div>
+            <div id="mate-status" class="status-line">Load analyzed games to start the trainer.</div>
+          </div>
+          <div class="mate-info-column">
+            <div class="mate-info-eyebrow">Puzzle</div>
+            <h3 id="mate-title">Pick the next missed finish</h3>
+            <p id="mate-subtitle" class="stats-panel-copy">The shortest mate opportunities appear first.</p>
+            <div id="mate-summary" class="mate-summary">
+              <div class="history-empty">No active puzzle.</div>
+            </div>
+            <div class="tool-row tri-action-row mate-action-row">
+              <button id="btn-mate-next" type="button" disabled>Next puzzle</button>
+              <button id="btn-mate-analyze" type="button" disabled>Analyze in main tab</button>
+              <button id="btn-mate-finish" type="button" disabled>Finish review</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel stats-panel">
+        <h2>General queue</h2>
+        <div id="stats-mate-queue" class="stats-table-wrap">
+          <div class="history-empty">No data.</div>
+        </div>
+      </section>
+
+      <section class="panel stats-panel">
+        <h2>Reviewed history</h2>
+        <div id="stats-mate-history" class="stats-table-wrap">
+          <div class="history-empty">No data.</div>
+        </div>
+      </section>
+
+      <section class="panel stats-panel">
+        <h2>All missed mate positions</h2>
+        <div id="stats-mate-positions" class="stats-table-wrap">
+          <div class="history-empty">No data.</div>
+        </div>
+      </section>
+    </div>
   </main>
 
-  <script src="{{ url_for('static', filename='stats.js', v='20260216-14') }}"></script>
+  <script src="{{ url_for('static', filename='vendor/jquery/jquery-3.6.0.min.js', v='20260216-09') }}"></script>
+  <script src="{{ url_for('static', filename='vendor/chessjs/chess.umd.js', v='20260216-09') }}"></script>
+  <script src="{{ url_for('static', filename='vendor/chessboard/chessboard-1.0.0.min.js', v='20260216-09') }}"></script>
+  <script src="{{ url_for('static', filename='stats.js', v='20260504-02') }}"></script>
 </body>
 </html>

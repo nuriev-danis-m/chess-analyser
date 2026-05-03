@@ -6,11 +6,13 @@ import math
 import os
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 from collections import Counter
 from logging.handlers import RotatingFileHandler
@@ -46,15 +48,20 @@ PIECE_VALUES = {
 
 CHESSCOM_BASE = "https://api.chess.com/pub"
 CHESSCOM_USER_AGENT = "chess-pgn-analyzer/1.0 (contact: local-app)"
+MATE_PUZZLE_MAX_PLIES = 160
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 GAMES_STORE_PATH = os.path.join(DATA_DIR, "chesscom_games_store.json")
 ANALYSIS_STORE_PATH = os.path.join(DATA_DIR, "analysis_store.json")
+BATCH_ANALYSIS_STORE_PATH = os.path.join(DATA_DIR, "batch_analysis_store.json")
 LOGS_DIR = os.path.join(os.path.dirname(__file__), "logs")
 APP_LOG_PATH = os.path.join(LOGS_DIR, "app.log")
 STORE_LOCK = threading.Lock()
 ACTIVE_ANALYSIS_LOCK = threading.Lock()
 ACTIVE_ANALYSIS_JOBS: Dict[str, float] = {}
 ANALYSIS_SLOT_LOCK = threading.Lock()
+ACTIVE_BATCH_LOCK = threading.Lock()
+ACTIVE_BATCH_JOB_ID: Optional[str] = None
+ACTIVE_BATCH_THREAD: Optional[threading.Thread] = None
 
 
 def ensure_data_dir() -> None:
@@ -158,6 +165,14 @@ def load_analysis_store() -> Dict[str, Any]:
 
 def save_analysis_store(store: Dict[str, Any]) -> None:
     write_json_atomic(ANALYSIS_STORE_PATH, store)
+
+
+def load_batch_analysis_store() -> Dict[str, Any]:
+    return read_json_file(BATCH_ANALYSIS_STORE_PATH, {"jobs": {}})
+
+
+def save_batch_analysis_store(store: Dict[str, Any]) -> None:
+    write_json_atomic(BATCH_ANALYSIS_STORE_PATH, store)
 
 
 def has_eval_points(payload: Dict[str, Any]) -> bool:
@@ -383,6 +398,13 @@ def sanitize_username(value: str) -> str:
     return re.sub(r"[^a-z0-9_-]", "", normalized)
 
 
+def analysis_key_game_id(key: str) -> str:
+    if not isinstance(key, str) or not key.startswith("chesscom:"):
+        return ""
+    parts = key.split(":", maxsplit=2)
+    return parts[1] if len(parts) >= 2 else ""
+
+
 def fetch_json(url: str) -> Dict[str, Any]:
     req = urllib.request.Request(
         url,
@@ -515,6 +537,117 @@ def resolve_player_side_for_entry(entry: Dict[str, Any], username_lc: str) -> Op
     return "white"
 
 
+class AnalysisConflictError(RuntimeError):
+    pass
+
+
+class AnalysisNotFoundError(LookupError):
+    pass
+
+
+def resolve_default_chesscom_side(entry: Dict[str, Any]) -> str:
+    owner_username = sanitize_username(str(entry.get("username", "")))
+    resolved = resolve_player_side_for_entry(entry, owner_username) if owner_username else None
+    return "black" if resolved == "black" else "white"
+
+
+def batch_job_scope_key(username: str, max_games: int) -> str:
+    return f"{sanitize_username(username)}::{clamp(int(max_games), 1, 5000)}"
+
+
+def register_active_batch_thread(job_id: str, thread: threading.Thread) -> None:
+    global ACTIVE_BATCH_JOB_ID, ACTIVE_BATCH_THREAD
+    with ACTIVE_BATCH_LOCK:
+        ACTIVE_BATCH_JOB_ID = job_id
+        ACTIVE_BATCH_THREAD = thread
+
+
+def clear_active_batch_thread(job_id: str) -> None:
+    global ACTIVE_BATCH_JOB_ID, ACTIVE_BATCH_THREAD
+    with ACTIVE_BATCH_LOCK:
+        if ACTIVE_BATCH_JOB_ID == job_id:
+            ACTIVE_BATCH_JOB_ID = None
+            ACTIVE_BATCH_THREAD = None
+
+
+def is_batch_job_running(job_id: Optional[str] = None) -> bool:
+    with ACTIVE_BATCH_LOCK:
+        thread = ACTIVE_BATCH_THREAD
+        active_job_id = ACTIVE_BATCH_JOB_ID
+    if not thread or not thread.is_alive() or not active_job_id:
+        return False
+    return active_job_id == job_id if job_id else True
+
+
+def persist_batch_job(job: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(job, dict) or not str(job.get("job_id", "")).strip():
+        raise ValueError("Batch job payload must include job_id.")
+
+    snapshot = dict(job)
+    jobs_to_keep = 32
+    with STORE_LOCK:
+        store = load_batch_analysis_store()
+        jobs = store.setdefault("jobs", {})
+        jobs[str(snapshot["job_id"])] = snapshot
+        ordered_ids = sorted(
+            jobs.keys(),
+            key=lambda job_id: int((jobs.get(job_id, {}) or {}).get("started_at") or 0),
+            reverse=True,
+        )
+        for stale_id in ordered_ids[jobs_to_keep:]:
+            jobs.pop(stale_id, None)
+        save_batch_analysis_store(store)
+    return snapshot
+
+
+def latest_batch_job_snapshot(username: str, max_games: int) -> Optional[Dict[str, Any]]:
+    scope_key = batch_job_scope_key(username, max_games)
+    with STORE_LOCK:
+        store = load_batch_analysis_store()
+        jobs = store.get("jobs", {}) or {}
+        candidates = [
+            dict(payload)
+            for payload in jobs.values()
+            if isinstance(payload, dict) and str(payload.get("scope_key", "")) == scope_key
+        ]
+
+    if not candidates:
+        return None
+
+    latest = max(
+        candidates,
+        key=lambda payload: (
+            int(payload.get("started_at") or 0),
+            int(payload.get("updated_at") or 0),
+        ),
+    )
+    status = str(latest.get("status", "")).lower()
+    if status in {"queued", "running"} and not is_batch_job_running(str(latest.get("job_id", ""))):
+        latest["status"] = "interrupted"
+        latest["finished_at"] = int(time.time())
+        latest["updated_at"] = int(time.time())
+        latest.setdefault("message", "Batch analysis stopped when the server process ended.")
+        persist_batch_job(latest)
+    latest["active"] = is_batch_job_running(str(latest.get("job_id", "")))
+    return latest
+
+
+def build_batch_queue(*, username: str, max_games: int, mode: str) -> List[Dict[str, Any]]:
+    summary = summarize_cached_chesscom_games(username=username, max_games=max_games)
+    games = [
+        game
+        for game in (summary.get("games") or [])
+        if isinstance(game, dict) and str(game.get("game_id", "")).strip()
+    ]
+    if mode == "missing":
+        return [
+            game
+            for game in games
+            if int(game.get("saved_analyses") or 0) <= 0
+        ]
+    return games
+
+
 def opening_meta_for_entry(entry: Dict[str, Any]) -> Dict[str, str]:
     eco = str(entry.get("eco", "")).strip()
     opening = str(entry.get("opening", "")).strip()
@@ -599,6 +732,266 @@ def to_float(value: Any, default: float = 0.0) -> float:
 
 def cp_white_to_player(cp_white: int, side: str) -> int:
     return cp_white if side == "white" else -cp_white
+
+
+def normalize_side(value: Any, default: str = "white") -> str:
+    return "black" if str(value or default).strip().lower() == "black" else "white"
+
+
+def analysis_total_plies(analysis: Dict[str, Any]) -> int:
+    mainline = analysis.get("mainline_uci")
+    if isinstance(mainline, list):
+        return len(mainline)
+
+    max_ply = 0
+    for key in ("eval_points", "player_moves"):
+        items = analysis.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            max_ply = max(max_ply, to_int(item.get("ply"), 0))
+    return max_ply
+
+
+def build_mate_hunt_row(
+    *,
+    game_id: str,
+    summary: Dict[str, Any],
+    player_side: str,
+    total_plies: int,
+    move: Dict[str, Any],
+    best_move: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    best_mate = best_move.get("mate")
+    if not isinstance(best_mate, (int, float)):
+        return None
+    best_mate_int = int(best_mate)
+    if best_mate_int <= 0:
+        return None
+
+    best_uci = str(best_move.get("uci", ""))
+    played_uci = str(move.get("uci", ""))
+    if not best_uci or played_uci == best_uci:
+        return None
+
+    ply = max(1, to_int(move.get("ply"), 0))
+    plies_left = max(0, total_plies - ply)
+    return {
+        "game_id": game_id,
+        "url": str(summary.get("url", "")),
+        "white": str(summary.get("white", "")),
+        "black": str(summary.get("black", "")),
+        "opening": str(summary.get("opening", "")),
+        "eco": str(summary.get("eco", "")),
+        "result_bucket": str(summary.get("player_result_bucket", "")).lower(),
+        "player_side": player_side,
+        "end_time_iso": str(summary.get("end_time_iso", "")),
+        "ply": ply,
+        "move_number": to_int(move.get("move_number"), (ply + 1) // 2),
+        "side": normalize_side(move.get("side", player_side), player_side),
+        "san": str(move.get("san", "")),
+        "uci": played_uci,
+        "best_san": str(best_move.get("san", "")),
+        "best_uci": best_uci,
+        "best_mate": best_mate_int,
+        "cp_loss": max(0, to_int(move.get("cp_loss"), 0)),
+        "plies_left": plies_left,
+        "full_moves_left": int(math.ceil(plies_left / 2.0)),
+        "fen_before": str(move.get("fen_before", "")),
+    }
+
+
+def resolve_cached_game_summary(entry: Dict[str, Any], game_id: str, side: str) -> Dict[str, Any]:
+    white_data = entry.get("white", {}) or {}
+    black_data = entry.get("black", {}) or {}
+    opening_meta = opening_meta_for_entry(entry)
+    end_time = int(entry.get("end_time", 0) or 0)
+    result_raw = str((entry.get(side, {}) or {}).get("result", ""))
+    return {
+        "game_id": str(game_id),
+        "url": str(entry.get("url", "")),
+        "white": str(white_data.get("username", "")),
+        "black": str(black_data.get("username", "")),
+        "player_side": side,
+        "player_result": result_raw,
+        "player_result_bucket": classify_player_result(result_raw),
+        "end_time": end_time,
+        "end_time_iso": ts_to_iso(end_time),
+        "eco": opening_meta.get("eco", ""),
+        "opening": opening_meta.get("opening", ""),
+    }
+
+
+def build_forced_mate_line(
+    *,
+    start_fen: str,
+    first_uci: str,
+    mate_in: int,
+    player_side: str,
+) -> List[Dict[str, Any]]:
+    board = chess.Board(start_fen)
+    first_move = chess.Move.from_uci(first_uci)
+    if first_move not in board.legal_moves:
+        raise ValueError("Stored mating move is no longer legal in the puzzle position.")
+
+    stockfish_path = find_stockfish_path()
+    line: List[Dict[str, Any]] = []
+    remaining_player_mates = max(1, int(mate_in))
+    hard_cap = min(MATE_PUZZLE_MAX_PLIES, max(4, remaining_player_mates * 2 + 8))
+
+    with chess.engine.SimpleEngine.popen_uci(stockfish_path) as engine:
+        engine.configure({"Threads": max(1, min(4, full_cpu_threads()))})
+        if "Hash" in engine.options:
+            engine.configure({"Hash": 256})
+
+        while not board.is_game_over() and len(line) < hard_cap:
+            current_side = "white" if board.turn == chess.WHITE else "black"
+            if not line:
+                move = first_move
+            else:
+                limit = chess.engine.Limit(mate=max(1, remaining_player_mates))
+                raw_info = engine.analyse(board, limit, multipv=1)
+                info = raw_info[0] if isinstance(raw_info, list) else raw_info
+                lines = parse_engine_info(board, [info], board.turn)
+                if not lines:
+                    break
+                move = lines[0]["move"]
+
+            if move not in board.legal_moves:
+                break
+
+            row = {
+                "side": current_side,
+                "fen_before": board.fen(),
+                "uci": move.uci(),
+                "san": safe_san(board, move),
+            }
+            board.push(move)
+            row["fen_after"] = board.fen()
+            line.append(row)
+
+            if current_side == player_side and remaining_player_mates > 0:
+                remaining_player_mates -= 1
+
+        if not board.is_checkmate():
+            raise RuntimeError("Could not reconstruct a full mate line for this puzzle.")
+
+    return line
+
+
+def build_mate_hunt_payload(
+    *,
+    summary_map: Dict[str, Dict[str, Any]],
+    analyzed_by_game: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    position_rows: List[Dict[str, Any]] = []
+    game_rows: List[Dict[str, Any]] = []
+    wins_with_missed_finish = 0
+    mate_in_one_missed = 0
+    shortest_mate: Optional[int] = None
+
+    for game_id, analysis in analyzed_by_game.items():
+        summary = summary_map.get(game_id, {}) or {}
+        result_bucket = str(summary.get("player_result_bucket", "")).lower()
+        player_side = normalize_side(
+            (analysis.get("settings", {}) or {}).get("side", "") or summary.get("player_side", "white"),
+            "white",
+        )
+
+        player_moves = analysis.get("player_moves", []) or []
+        if not isinstance(player_moves, list) or not player_moves:
+            continue
+
+        total_plies = analysis_total_plies(analysis)
+        if total_plies <= 0:
+            continue
+
+        missed_in_game = 0
+        primary_row: Optional[Dict[str, Any]] = None
+        for move in player_moves:
+            if not isinstance(move, dict):
+                continue
+            top_moves = move.get("top_moves", [])
+            if not isinstance(top_moves, list) or not top_moves:
+                continue
+            best_move = top_moves[0]
+            if not isinstance(best_move, dict):
+                continue
+
+            row = build_mate_hunt_row(
+                game_id=game_id,
+                summary=summary,
+                player_side=player_side,
+                total_plies=total_plies,
+                move=move,
+                best_move=best_move,
+            )
+            if row is None:
+                continue
+
+            position_rows.append(row)
+            missed_in_game += 1
+
+            if row["best_mate"] == 1:
+                mate_in_one_missed += 1
+            if shortest_mate is None or row["best_mate"] < shortest_mate:
+                shortest_mate = row["best_mate"]
+            if primary_row is None or (
+                row["best_mate"],
+                row["ply"],
+                -row["plies_left"],
+                -row["cp_loss"],
+            ) < (
+                primary_row["best_mate"],
+                primary_row["ply"],
+                -primary_row["plies_left"],
+                -primary_row["cp_loss"],
+            ):
+                primary_row = row
+
+        if primary_row is None:
+            continue
+
+        if result_bucket == "win":
+            wins_with_missed_finish += 1
+
+        game_rows.append(
+            {
+                **primary_row,
+                "missed_positions": missed_in_game,
+            }
+        )
+
+    position_rows.sort(
+        key=lambda row: (
+            to_int(row.get("best_mate"), 99),
+            -to_int(row.get("plies_left"), 0),
+            0 if str(row.get("result_bucket", "")).lower() == "win" else 1,
+            -to_int(row.get("cp_loss"), 0),
+            to_int(row.get("ply"), 0),
+        )
+    )
+    game_rows.sort(
+        key=lambda row: (
+            to_int(row.get("best_mate"), 99),
+            -to_int(row.get("plies_left"), 0),
+            0 if str(row.get("result_bucket", "")).lower() == "win" else 1,
+            -to_int(row.get("missed_positions"), 0),
+            to_int(row.get("ply"), 0),
+        )
+    )
+
+    return {
+        "missed_positions": len(position_rows),
+        "games_with_missed_finish": len(game_rows),
+        "won_games_with_missed_finish": wins_with_missed_finish,
+        "mate_in_one_missed": mate_in_one_missed,
+        "shortest_mate": shortest_mate,
+        "games": game_rows,
+        "positions": position_rows,
+    }
 
 
 def build_insights_overview(
@@ -908,6 +1301,10 @@ def build_insights_overview(
         if games_with_advantage
         else None
     )
+    mate_hunt = build_mate_hunt_payload(
+        summary_map=summary_map,
+        analyzed_by_game=analyzed_by_game,
+    )
 
     return {
         "username": username,
@@ -930,6 +1327,7 @@ def build_insights_overview(
             "big_drops_count": advantage_drop_count,
             "samples": advantage_samples[:12],
         },
+        "mate_hunt": mate_hunt,
         "updated_at": summary_payload.get("updated_at"),
     }
 
@@ -973,18 +1371,48 @@ def fetch_chesscom_games(username: str, max_games: int) -> List[Dict[str, Any]]:
     return collected[:max_games]
 
 
-def find_stockfish_path() -> str:
+def stockfish_search_candidates() -> List[str]:
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    local_bin_dir = os.path.join(project_dir, "bin")
     candidates = [
-        os.environ.get("STOCKFISH_PATH"),
+        os.environ.get("STOCKFISH_PATH", "").strip(),
         "stockfish",
         "stockfish.exe",
-        os.path.join("bin", "stockfish.exe"),
-        os.path.join("bin", "stockfish"),
-        r"C:\Program Files\Stockfish\stockfish.exe",
-        r"C:\Program Files (x86)\Stockfish\stockfish.exe",
+        os.path.join(local_bin_dir, "stockfish"),
+        os.path.join(local_bin_dir, "stockfish.exe"),
+        "/usr/local/bin/stockfish",
+        "/usr/bin/stockfish",
+        "/usr/games/stockfish",
+        "/snap/bin/stockfish",
     ]
 
+    if sys.platform == "darwin":
+        candidates.extend(
+            [
+                "/opt/homebrew/bin/stockfish",
+                "/opt/local/bin/stockfish",
+            ]
+        )
+    if os.name == "nt":
+        candidates.extend(
+            [
+                r"C:\Program Files\Stockfish\stockfish.exe",
+                r"C:\Program Files (x86)\Stockfish\stockfish.exe",
+            ]
+        )
+
+    unique_candidates: List[str] = []
+    seen = set()
     for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        unique_candidates.append(candidate)
+    return unique_candidates
+
+
+def find_stockfish_path() -> str:
+    for candidate in stockfish_search_candidates():
         if not candidate:
             continue
         if os.path.isfile(candidate):
@@ -995,7 +1423,26 @@ def find_stockfish_path() -> str:
 
     raise FileNotFoundError(
         "Stockfish not found. Set the full path via the STOCKFISH_PATH environment "
-        "variable or place the binary at ./bin/stockfish(.exe)."
+        "variable, install it in PATH, or place the binary at ./bin/stockfish(.exe)."
+    )
+
+
+def read_server_port(default: int = 5000) -> int:
+    raw_value = str(os.environ.get("PORT", default)).strip()
+    try:
+        port = int(raw_value)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(65535, port))
+
+
+def run_local_server(*, debug: bool = False) -> None:
+    host = str(os.environ.get("HOST", "127.0.0.1")).strip() or "127.0.0.1"
+    app.run(
+        host=host,
+        port=read_server_port(),
+        debug=debug,
+        use_reloader=debug,
     )
 
 
@@ -1533,6 +1980,120 @@ def insights_overview_endpoint():
         return jsonify({"error": f"Position analysis failed: {exc}"}), 500
 
 
+@app.post("/api/mate-hunt/puzzle")
+def mate_hunt_puzzle_endpoint():
+    try:
+        payload = request.get_json(silent=True) or {}
+        game_id = str(payload.get("game_id", "")).strip()
+        if not game_id:
+            return jsonify({"error": "Field game_id is required."}), 400
+
+        ply = clamp(int(payload.get("ply", 0)), 1, 10_000)
+        username = sanitize_username(str(payload.get("username", "")))
+        requested_side = str(payload.get("side", "")).strip().lower()
+
+        with STORE_LOCK:
+            games_store = load_games_store()
+            game_entry = (games_store.get("games") or {}).get(game_id)
+            analysis_store = load_analysis_store()
+            analysis_map = analysis_store.get("analyses", {}) or {}
+
+        if not isinstance(game_entry, dict):
+            return jsonify({"error": "Game not found in local cache."}), 404
+
+        resolved_side = (
+            requested_side
+            if requested_side in {"white", "black"}
+            else resolve_player_side_for_entry(game_entry, username) or "white"
+        )
+        analysis_index = parse_chesscom_analysis_index(analysis_map)
+        picked = pick_latest_analysis_for_side(analysis_index.get(game_id, []), resolved_side)
+        if not picked:
+            return jsonify({"error": "No analyzed game found for this puzzle."}), 404
+
+        analysis = picked.get("payload", {}) or {}
+        player_moves = analysis.get("player_moves", []) or []
+        if not isinstance(player_moves, list):
+            return jsonify({"error": "Puzzle move list is unavailable in cached analysis."}), 404
+
+        target_move = next(
+            (
+                item
+                for item in player_moves
+                if isinstance(item, dict) and to_int(item.get("ply"), -1) == ply
+            ),
+            None,
+        )
+        if target_move is None:
+            return jsonify({"error": "Puzzle position was not found in analyzed moves."}), 404
+
+        top_moves = target_move.get("top_moves", []) or []
+        best_move = top_moves[0] if isinstance(top_moves, list) and top_moves else None
+        if not isinstance(best_move, dict):
+            return jsonify({"error": "Puzzle move does not contain mating candidates."}), 404
+
+        summary = resolve_cached_game_summary(game_entry, game_id, normalize_side(resolved_side))
+        puzzle_row = build_mate_hunt_row(
+            game_id=game_id,
+            summary=summary,
+            player_side=normalize_side(resolved_side),
+            total_plies=analysis_total_plies(analysis),
+            move=target_move,
+            best_move=best_move,
+        )
+        if puzzle_row is None:
+            return jsonify({"error": "This position is not a valid mating puzzle."}), 400
+
+        line = build_forced_mate_line(
+            start_fen=str(puzzle_row.get("fen_before", "")),
+            first_uci=str(puzzle_row.get("best_uci", "")),
+            mate_in=to_int(puzzle_row.get("best_mate"), 1),
+            player_side=normalize_side(puzzle_row.get("player_side", "white")),
+        )
+        app.logger.info(
+            "Mate hunt puzzle game_id=%s ply=%s side=%s mate_in=%s line_len=%s",
+            game_id,
+            ply,
+            resolved_side,
+            puzzle_row.get("best_mate"),
+            len(line),
+        )
+        return jsonify(
+            {
+                "puzzle_key": f"{game_id}:{ply}:{normalize_side(resolved_side)}",
+                "username": username or str(game_entry.get("username", "")),
+                "game_id": game_id,
+                "ply": ply,
+                "side": normalize_side(resolved_side),
+                "start_fen": str(puzzle_row.get("fen_before", "")),
+                "target_mate": to_int(puzzle_row.get("best_mate"), 1),
+                "line": line,
+                "url": str(summary.get("url", "")),
+                "white": str(summary.get("white", "")),
+                "black": str(summary.get("black", "")),
+                "opening": str(summary.get("opening", "")),
+                "eco": str(summary.get("eco", "")),
+                "result_bucket": str(summary.get("player_result_bucket", "")),
+                "end_time_iso": str(summary.get("end_time_iso", "")),
+                "played_san": str(puzzle_row.get("san", "")),
+                "played_uci": str(puzzle_row.get("uci", "")),
+                "best_san": str(puzzle_row.get("best_san", "")),
+                "best_uci": str(puzzle_row.get("best_uci", "")),
+                "plies_left": to_int(puzzle_row.get("plies_left"), 0),
+                "full_moves_left": to_int(puzzle_row.get("full_moves_left"), 0),
+                "missed_positions": 1,
+            }
+        )
+    except FileNotFoundError as exc:
+        app.logger.exception("Stockfish binary missing for mate hunt")
+        return jsonify({"error": str(exc)}), 500
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid puzzle parameters."}), 400
+    except Exception as exc:
+        app.logger.exception("Mate hunt puzzle build failed")
+        return jsonify({"error": f"Puzzle build failed: {exc}"}), 500
+
+
 @app.get("/api/chesscom/cached-games")
 def chesscom_cached_games_endpoint():
     try:
@@ -1550,6 +2111,69 @@ def chesscom_cached_games_endpoint():
     except Exception as exc:
         app.logger.exception("Cached games load failed")
         return jsonify({"error": f"Position analysis failed: {exc}"}), 500
+
+
+@app.post("/api/chesscom/clear-cache")
+def chesscom_clear_cache_endpoint():
+    try:
+        if is_batch_job_running():
+            return (
+                jsonify(
+                    {
+                        "error": (
+                            "A batch analysis is still running. "
+                            "Wait until it finishes before clearing the cache."
+                        )
+                    }
+                ),
+                409,
+            )
+
+        with STORE_LOCK:
+            games_store = load_games_store()
+            analysis_store = load_analysis_store()
+            batch_store = load_batch_analysis_store()
+            game_map = games_store.get("games", {}) or {}
+            analysis_map = analysis_store.get("analyses", {}) or {}
+            batch_jobs = batch_store.get("jobs", {}) or {}
+
+            removed_game_ids = [str(game_id) for game_id in game_map.keys()]
+            removed_games = len(removed_game_ids)
+            removed_analyses = len(
+                [
+                    key
+                    for key in analysis_map.keys()
+                    if analysis_key_game_id(key) or str(key).startswith("chesscom:")
+                ]
+            )
+            removed_batch_jobs = len(batch_jobs)
+
+            games_store["games"] = {}
+            games_store["updated_at"] = int(time.time())
+            analysis_store["analyses"] = {}
+            analysis_store["updated_at"] = int(time.time())
+            batch_store["jobs"] = {}
+            save_games_store(games_store)
+            save_analysis_store(analysis_store)
+            save_batch_analysis_store(batch_store)
+
+        app.logger.info(
+            "Chess.com cache cleared removed_games=%s removed_analyses=%s removed_batch_jobs=%s",
+            removed_games,
+            removed_analyses,
+            removed_batch_jobs,
+        )
+        return jsonify(
+            {
+                "cleared": True,
+                "removed_games": removed_games,
+                "removed_analyses": removed_analyses,
+                "removed_batch_jobs": removed_batch_jobs,
+            }
+        )
+    except Exception as exc:
+        app.logger.exception("Chess.com cache clear failed")
+        return jsonify({"error": f"Cache clear failed: {exc}"}), 500
 
 
 @app.get("/api/chesscom/player-games")
@@ -1695,6 +2319,352 @@ def chesscom_player_games_endpoint():
         return jsonify({"error": f"Position analysis failed: {exc}"}), 500
 
 
+def analyze_cached_chesscom_game(
+    *,
+    game_id: str,
+    side: str,
+    depth: int,
+    threads: int,
+    hash_mb: int,
+    target_time_sec: float,
+    pv_plies: int,
+    force_reanalyze: bool,
+    allow_compatible_cache: bool,
+    skip_slot_lock: bool = False,
+) -> Dict[str, Any]:
+    with STORE_LOCK:
+        games_store = load_games_store()
+        game_entry = (games_store.get("games") or {}).get(game_id)
+
+    if not game_entry:
+        raise AnalysisNotFoundError(
+            "Game not found in local cache. Load games first via /api/chesscom/player-games."
+        )
+
+    resolved_side = normalize_side(side or resolve_default_chesscom_side(game_entry), "white")
+    analysis_key = build_analysis_key(
+        source="chesscom",
+        game_id=game_id,
+        side=resolved_side,
+        depth=depth,
+        threads=threads,
+        pv_plies=pv_plies,
+    )
+
+    with STORE_LOCK:
+        analysis_store = load_analysis_store()
+        analysis_map = analysis_store.get("analyses", {}) or {}
+        existing = analysis_map.get(analysis_key)
+        fallback_cached = (
+            None
+            if force_reanalyze or not allow_compatible_cache
+            else best_cached_chesscom_analysis(
+                analysis_map=analysis_map,
+                game_id=game_id,
+                side=resolved_side,
+            )
+        )
+
+    if existing and not force_reanalyze:
+        if has_eval_points(existing):
+            app.logger.info("Chess.com analysis cache hit key=%s", analysis_key)
+            return prepare_cached_analysis_payload(existing, analysis_key)
+        app.logger.info(
+            "Chess.com analysis cache upgrade key=%s missing_eval_points=true",
+            analysis_key,
+        )
+
+    if fallback_cached and not force_reanalyze:
+        fallback_key = str(fallback_cached.get("key", "")).strip()
+        fallback_payload = fallback_cached.get("payload", {}) or {}
+        if fallback_key and isinstance(fallback_payload, dict):
+            app.logger.info(
+                "Chess.com analysis compatible cache hit requested=%s matched=%s",
+                analysis_key,
+                fallback_key,
+            )
+            data = prepare_cached_analysis_payload(fallback_payload, fallback_key)
+            data["cache_match"] = "compatible"
+            return data
+
+    pgn_text = str(game_entry.get("pgn", "")).strip()
+    game = chess.pgn.read_game(io.StringIO(pgn_text))
+    if game is None:
+        raise RuntimeError("Failed to parse cached game PGN.")
+
+    slot_locked = False
+    job_marked = False
+    job_key = f"chesscom:{game_id}:side={resolved_side}"
+    if not skip_slot_lock:
+        if not try_mark_analysis_job(job_key):
+            raise AnalysisConflictError(
+                "Analysis for this game is already running. Wait until it finishes and click Review again."
+            )
+        job_marked = True
+        if not ANALYSIS_SLOT_LOCK.acquire(blocking=False):
+            finish_analysis_job(job_key)
+            job_marked = False
+            raise AnalysisConflictError(
+                "Another full analysis is running right now. Wait until it finishes and retry your request."
+            )
+        slot_locked = True
+
+    try:
+        analysis = analyze_game(
+            game,
+            side=resolved_side,
+            depth=depth,
+            threads=threads,
+            hash_mb=hash_mb,
+            target_time_sec=target_time_sec,
+            pv_plies=pv_plies,
+        )
+    finally:
+        if slot_locked:
+            ANALYSIS_SLOT_LOCK.release()
+        if job_marked:
+            finish_analysis_job(job_key)
+
+    analysis["source"] = {
+        "provider": "chesscom",
+        "game_id": game_id,
+        "url": game_entry.get("url", ""),
+        "username": game_entry.get("username", ""),
+        "end_time": game_entry.get("end_time"),
+        "end_time_iso": ts_to_iso(game_entry.get("end_time")),
+    }
+    analysis["analysis_key"] = analysis_key
+    analysis["cached"] = False
+    analysis["saved_at"] = int(time.time())
+
+    with STORE_LOCK:
+        analysis_store = load_analysis_store()
+        analysis_map = analysis_store.setdefault("analyses", {})
+        analysis_map[analysis_key] = analysis
+        save_analysis_store(analysis_store)
+
+    app.logger.info("Chess.com analysis saved key=%s", analysis_key)
+    return analysis
+
+
+def run_chesscom_batch_job(job: Dict[str, Any], queue: List[Dict[str, Any]]) -> None:
+    job_id = str(job.get("job_id", ""))
+    slot_locked = False
+    try:
+        job["status"] = "queued"
+        job["active"] = True
+        job["message"] = "Waiting for the analysis slot."
+        job["updated_at"] = int(time.time())
+        persist_batch_job(job)
+
+        ANALYSIS_SLOT_LOCK.acquire()
+        slot_locked = True
+
+        job["status"] = "running"
+        job["message"] = "Batch analysis is running."
+        job["updated_at"] = int(time.time())
+        persist_batch_job(job)
+
+        for index, game in enumerate(queue, start=1):
+            game_id = str((game or {}).get("game_id", "")).strip()
+            side = normalize_side((game or {}).get("player_side", "white"), "white")
+            if not game_id:
+                job["processed"] = index
+                job["failed"] = int(job.get("failed") or 0) + 1
+                job["updated_at"] = int(time.time())
+                persist_batch_job(job)
+                continue
+
+            job["current_index"] = index
+            job["current_game_id"] = game_id
+            job["processed"] = index - 1
+            job["message"] = f"Analyzing {index}/{len(queue)} (game_id={game_id})."
+            job["updated_at"] = int(time.time())
+            persist_batch_job(job)
+
+            try:
+                analyze_cached_chesscom_game(
+                    game_id=game_id,
+                    side=side,
+                    depth=int(job.get("depth") or 14),
+                    threads=int(job.get("threads") or full_cpu_threads()),
+                    hash_mb=int(job.get("hash_mb") or stockfish_hash_mb(full_cpu_threads())),
+                    target_time_sec=float(job.get("target_time_sec") or 60.0),
+                    pv_plies=int(job.get("pv_plies") or 3),
+                    force_reanalyze=bool(job.get("force_reanalyze")),
+                    allow_compatible_cache=bool(job.get("allow_compatible_cache")),
+                    skip_slot_lock=True,
+                )
+                job["success"] = int(job.get("success") or 0) + 1
+            except Exception as exc:
+                app.logger.exception("Batch analysis failed for game_id=%s", game_id)
+                job["failed"] = int(job.get("failed") or 0) + 1
+                failed_ids = job.setdefault("failed_ids", [])
+                if len(failed_ids) < 24:
+                    failed_ids.append(game_id)
+                failures = job.setdefault("failures", [])
+                if len(failures) < 12:
+                    failures.append({"game_id": game_id, "error": str(exc)})
+            finally:
+                job["processed"] = index
+                job["updated_at"] = int(time.time())
+                persist_batch_job(job)
+
+        job["current_index"] = int(job.get("total") or len(queue))
+        job["current_game_id"] = ""
+        job["finished_at"] = int(time.time())
+        job["updated_at"] = int(time.time())
+        job["active"] = False
+        if int(job.get("failed") or 0) > 0:
+            job["status"] = "completed_with_errors"
+            job["message"] = (
+                f"Batch analysis finished with errors. Success: {job.get('success', 0)}, "
+                f"failed: {job.get('failed', 0)}."
+            )
+        else:
+            job["status"] = "completed"
+            job["message"] = f"Batch analysis finished. Success: {job.get('success', 0)}."
+        persist_batch_job(job)
+    except Exception as exc:
+        app.logger.exception("Batch analysis worker crashed job_id=%s", job_id)
+        job["status"] = "failed"
+        job["active"] = False
+        job["finished_at"] = int(time.time())
+        job["updated_at"] = int(time.time())
+        job["message"] = f"Batch analysis failed: {exc}"
+        persist_batch_job(job)
+    finally:
+        if slot_locked:
+            ANALYSIS_SLOT_LOCK.release()
+        clear_active_batch_thread(job_id)
+
+
+@app.get("/api/chesscom/batch-analysis/status")
+def chesscom_batch_analysis_status_endpoint():
+    try:
+        username = sanitize_username(request.args.get("username", ""))
+        max_games = clamp(int(request.args.get("max_games", 25)), 1, 5000)
+        if not username:
+            return jsonify({"job": None})
+        return jsonify({"job": latest_batch_job_snapshot(username, max_games)})
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid batch status parameters."}), 400
+    except Exception as exc:
+        app.logger.exception("Batch status load failed")
+        return jsonify({"error": f"Batch status load failed: {exc}"}), 500
+
+
+@app.post("/api/chesscom/batch-analysis/start")
+def chesscom_batch_analysis_start_endpoint():
+    try:
+        payload = request.get_json(silent=True) or {}
+        username = sanitize_username(str(payload.get("username", "")))
+        if not username:
+            return jsonify({"error": "Field username is required."}), 400
+
+        max_games = clamp(int(payload.get("max_games", 25)), 1, 5000)
+        mode = str(payload.get("mode", "missing")).strip().lower()
+        if mode not in {"missing", "reanalyze", "deeper"}:
+            return jsonify({"error": "Unsupported batch mode."}), 400
+
+        threads = clamp(int(payload.get("threads", full_cpu_threads())), 1, 128)
+        hash_mb = clamp(int(payload.get("hash_mb", stockfish_hash_mb(threads))), 64, 8192)
+        depth = clamp(int(payload.get("depth", 14)), 6, 40)
+        target_time_sec = clamp_float(float(payload.get("target_time_sec", 60.0)), 20.0, 300.0)
+        pv_plies = clamp(int(payload.get("pv_plies", 3)), 2, 3)
+
+        current_job = latest_batch_job_snapshot(username, max_games)
+        if current_job and str(current_job.get("status", "")).lower() in {"queued", "running"} and current_job.get("active"):
+            return jsonify({"started": False, "job": current_job}), 200
+        if is_batch_job_running():
+            return (
+                jsonify(
+                    {
+                        "error": (
+                            "Another batch analysis is already running. "
+                            "Wait until it finishes before starting a new one."
+                        )
+                    }
+                ),
+                409,
+            )
+
+        queue = build_batch_queue(username=username, max_games=max_games, mode=mode)
+        if not queue:
+            return jsonify(
+                {
+                    "error": (
+                        "All loaded games are already analyzed."
+                        if mode == "missing"
+                        else "No cached games are available for reanalysis."
+                    )
+                }
+            ), 400
+
+        label = {
+            "missing": "Analyze unanalyzed",
+            "reanalyze": "Reanalyze all",
+            "deeper": "Reanalyze all deeper",
+        }[mode]
+        force_reanalyze = mode in {"reanalyze", "deeper"}
+        allow_compatible_cache = False if force_reanalyze else bool(payload.get("allow_compatible_cache", False))
+        now_ts = int(time.time())
+        job = {
+            "job_id": uuid.uuid4().hex,
+            "scope_key": batch_job_scope_key(username, max_games),
+            "username": username,
+            "max_games": max_games,
+            "mode": mode,
+            "label": label,
+            "status": "queued",
+            "active": True,
+            "depth": depth,
+            "threads": threads,
+            "hash_mb": hash_mb,
+            "target_time_sec": target_time_sec,
+            "pv_plies": pv_plies,
+            "force_reanalyze": force_reanalyze,
+            "allow_compatible_cache": allow_compatible_cache,
+            "total": len(queue),
+            "processed": 0,
+            "success": 0,
+            "failed": 0,
+            "current_index": 0,
+            "current_game_id": "",
+            "failed_ids": [],
+            "failures": [],
+            "message": "Batch analysis is queued.",
+            "started_at": now_ts,
+            "updated_at": now_ts,
+            "finished_at": None,
+        }
+        persist_batch_job(job)
+
+        worker = threading.Thread(
+            target=run_chesscom_batch_job,
+            args=(job, queue),
+            daemon=True,
+            name=f"batch-analysis-{job['job_id'][:8]}",
+        )
+        register_active_batch_thread(str(job["job_id"]), worker)
+        worker.start()
+
+        app.logger.info(
+            "Batch analysis started job_id=%s username=%s max_games=%s mode=%s total=%s",
+            job["job_id"],
+            username,
+            max_games,
+            mode,
+            len(queue),
+        )
+        return jsonify({"started": True, "job": latest_batch_job_snapshot(username, max_games) or job})
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid batch analysis parameters."}), 400
+    except Exception as exc:
+        app.logger.exception("Batch analysis start failed")
+        return jsonify({"error": f"Batch analysis start failed: {exc}"}), 500
+
+
 @app.post("/api/chesscom/analyze-game")
 def chesscom_analyze_game_endpoint():
     try:
@@ -1703,8 +2673,8 @@ def chesscom_analyze_game_endpoint():
         if not game_id:
             return jsonify({"error": "Field game_id is required."}), 400
 
-        side = str(payload.get("side", "white")).strip().lower()
-        if side not in {"white", "black"}:
+        side_raw = str(payload.get("side", "")).strip().lower()
+        if side_raw and side_raw not in {"white", "black"}:
             return jsonify({"error": "Parameter side must be white or black."}), 400
 
         depth = clamp(int(payload.get("depth", 14)), 6, 40)
@@ -1717,7 +2687,7 @@ def chesscom_analyze_game_endpoint():
         app.logger.info(
             "Chess.com analyze game_id=%s side=%s depth=%s threads=%s hash_mb=%s target_time_sec=%s pv_plies=%s force=%s allow_compatible_cache=%s",
             game_id,
-            side,
+            side_raw or "auto",
             depth,
             threads,
             hash_mb,
@@ -1726,140 +2696,25 @@ def chesscom_analyze_game_endpoint():
             force_reanalyze,
             allow_compatible_cache,
         )
-
-        with STORE_LOCK:
-            games_store = load_games_store()
-            game_entry = (games_store.get("games") or {}).get(game_id)
-
-        if not game_entry:
-            return (
-                jsonify(
-                    {
-                        "error": (
-                            "Game not found in local cache. "
-                            "Load games first via /api/chesscom/player-games."
-                        )
-                    }
-                ),
-                404,
-            )
-
-        analysis_key = build_analysis_key(
-            source="chesscom",
+        analysis = analyze_cached_chesscom_game(
             game_id=game_id,
-            side=side,
+            side=side_raw,
             depth=depth,
             threads=threads,
+            hash_mb=hash_mb,
+            target_time_sec=target_time_sec,
             pv_plies=pv_plies,
+            force_reanalyze=force_reanalyze,
+            allow_compatible_cache=allow_compatible_cache,
         )
-        job_key = f"chesscom:{game_id}:side={side}"
-
-        with STORE_LOCK:
-            analysis_store = load_analysis_store()
-            analysis_map = analysis_store.get("analyses", {}) or {}
-            existing = analysis_map.get(analysis_key)
-            fallback_cached = (
-                None
-                if force_reanalyze or not allow_compatible_cache
-                else best_cached_chesscom_analysis(
-                    analysis_map=analysis_map,
-                    game_id=game_id,
-                    side=side,
-                )
-            )
-
-        if existing and not force_reanalyze:
-            if has_eval_points(existing):
-                app.logger.info("Chess.com analysis cache hit key=%s", analysis_key)
-                return jsonify(prepare_cached_analysis_payload(existing, analysis_key))
-            app.logger.info(
-                "Chess.com analysis cache upgrade key=%s missing_eval_points=true",
-                analysis_key,
-            )
-
-        if fallback_cached and not force_reanalyze:
-            fallback_key = str(fallback_cached.get("key", "")).strip()
-            fallback_payload = fallback_cached.get("payload", {}) or {}
-            if fallback_key and isinstance(fallback_payload, dict):
-                app.logger.info(
-                    "Chess.com analysis compatible cache hit requested=%s matched=%s",
-                    analysis_key,
-                    fallback_key,
-                )
-                data = prepare_cached_analysis_payload(fallback_payload, fallback_key)
-                data["cache_match"] = "compatible"
-                return jsonify(data)
-
-        pgn_text = str(game_entry.get("pgn", "")).strip()
-        game = chess.pgn.read_game(io.StringIO(pgn_text))
-        if game is None:
-            return jsonify({"error": "Failed to parse cached game PGN."}), 500
-
-        if not try_mark_analysis_job(job_key):
-            app.logger.info("Chess.com analysis already running key=%s", job_key)
-            return (
-                jsonify(
-                    {
-                        "error": (
-                            "Analysis for this game is already running. "
-                            "Wait until it finishes and click Review again."
-                        )
-                    }
-                ),
-                409,
-            )
-
-        if not ANALYSIS_SLOT_LOCK.acquire(blocking=False):
-            finish_analysis_job(job_key)
-            app.logger.info("Analysis slot busy for key=%s", job_key)
-            return (
-                jsonify(
-                    {
-                        "error": (
-                            "Another full analysis is running right now. "
-                            "Wait until it finishes and retry your request."
-                        )
-                    }
-                ),
-                409,
-            )
-
-        try:
-            analysis = analyze_game(
-                game,
-                side=side,
-                depth=depth,
-                threads=threads,
-                hash_mb=hash_mb,
-                target_time_sec=target_time_sec,
-                pv_plies=pv_plies,
-            )
-        finally:
-            ANALYSIS_SLOT_LOCK.release()
-            finish_analysis_job(job_key)
-        analysis["source"] = {
-            "provider": "chesscom",
-            "game_id": game_id,
-            "url": game_entry.get("url", ""),
-            "username": game_entry.get("username", ""),
-            "end_time": game_entry.get("end_time"),
-            "end_time_iso": ts_to_iso(game_entry.get("end_time")),
-        }
-        analysis["analysis_key"] = analysis_key
-        analysis["cached"] = False
-        analysis["saved_at"] = int(time.time())
-
-        with STORE_LOCK:
-            analysis_store = load_analysis_store()
-            analysis_map = analysis_store.setdefault("analyses", {})
-            analysis_map[analysis_key] = analysis
-            save_analysis_store(analysis_store)
-
-        app.logger.info("Chess.com analysis saved key=%s", analysis_key)
         return jsonify(analysis)
     except FileNotFoundError as exc:
         app.logger.exception("Stockfish binary missing")
         return jsonify({"error": str(exc)}), 500
+    except AnalysisNotFoundError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except AnalysisConflictError as exc:
+        return jsonify({"error": str(exc)}), 409
     except (ValueError, TypeError):
         return jsonify({"error": "Invalid FEN or numeric analysis parameters."}), 400
     except Exception as exc:
@@ -2017,5 +2872,5 @@ def evaluate_position_endpoint():
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    run_local_server(debug=False)
 

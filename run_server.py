@@ -1,5 +1,5 @@
-from app import app
+from app import run_local_server
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False)
+    run_local_server(debug=False)

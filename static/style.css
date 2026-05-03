@@ -199,8 +199,22 @@ body {
 }
 
 .tri-action-row {
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   margin-top: 8px;
+}
+
+.chesscom-action-row {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+#btn-clear-cache {
+  background: linear-gradient(180deg, #b56245, #7e3d2b);
+  border-color: rgba(244, 153, 119, 0.44);
+  color: #fff5f0;
+}
+
+#btn-clear-cache:hover {
+  background: linear-gradient(180deg, #c06b4d, #8c4530);
 }
 
 .pgn-input-row {
@@ -333,6 +347,16 @@ button:hover {
 
 #btn-open-stats:hover {
   background: linear-gradient(180deg, #6a9b6f, #4a7450);
+}
+
+#btn-open-mate-hunt {
+  background: linear-gradient(180deg, #b35652, #7d3535);
+  border-color: rgba(237, 149, 141, 0.58);
+  color: #fff5f3;
+}
+
+#btn-open-mate-hunt:hover {
+  background: linear-gradient(180deg, #c3625d, #8c3e3e);
 }
 
 .status-line {
@@ -594,7 +618,7 @@ button:hover {
 
 .analysis-header {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto 1fr auto auto;
   gap: 12px;
   align-items: center;
   margin-bottom: 12px;
@@ -614,6 +638,22 @@ button:hover {
   margin: 2px 0 0;
   color: var(--muted);
   font-size: 0.87rem;
+}
+
+.analysis-head-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+#btn-finish-mate-review {
+  white-space: nowrap;
+  background: linear-gradient(180deg, #c78e3d, #935d23);
+  border-color: rgba(255, 193, 115, 0.48);
+  color: #fff7ea;
+}
+
+#btn-finish-mate-review:hover {
+  background: linear-gradient(180deg, #d59a46, #a56628);
 }
 
 .analysis-stats {

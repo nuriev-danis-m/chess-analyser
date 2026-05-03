@@ -11,6 +11,7 @@ data/
 logs/
 
 # Local binaries and archives (not for GitHub)
+bin/stockfish
 bin/stockfish.exe
 bin/stockfish.zip
 bin/stockfish_unpack/

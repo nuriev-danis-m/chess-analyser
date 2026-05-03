@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&family=Manrope:wght@400;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='vendor/chessboard/chessboard-1.0.0.min.css', v='20260216-09') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260216-13') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260503-02') }}">
 </head>
 <body>
   <div class="app-bg"></div>
@@ -54,24 +54,20 @@
                 <button id="btn-load-chesscom" type="button">Load</button>
               </div>
               <div id="chesscom-status" class="status-line">Enter a username and click Load.</div>
-              <div class="tool-row tri-action-row">
+              <div class="tool-row tri-action-row chesscom-action-row">
                 <button id="btn-analyze-missing" type="button">Analyze unanalyzed</button>
                 <button id="btn-reanalyze-all" type="button">Reanalyze all</button>
+                <button id="btn-reanalyze-all-deeper" type="button">Reanalyze all deeper</button>
+                <button id="btn-clear-cache" type="button">Clear cache</button>
                 <button id="btn-open-stats" type="button">Stats tab</button>
+                <button id="btn-open-mate-hunt" type="button">Where's my mate?</button>
               </div>
             </div>
 
             <details class="source-block collapsible-block" id="analysis-settings">
               <summary>Analysis settings</summary>
+              <input id="side" type="hidden" value="white">
               <div class="tool-row analysis-settings-row">
-                <label class="setting-field" for="side">
-                  <span class="setting-name">Side</span>
-                  <select id="side">
-                    <option value="white">White</option>
-                    <option value="black">Black</option>
-                  </select>
-                  <small>Which side the accuracy and move categories are computed for.</small>
-                </label>
                 <label class="setting-field" for="depth">
                   <span class="setting-name">Depth</span>
                   <input id="depth" type="number" min="6" max="40" value="14" placeholder="Depth">
@@ -101,7 +97,7 @@
                   <small>Recommended line/arrow length.</small>
                 </label>
               </div>
-              <div class="settings-hint">Fast mode: Depth 12-14, Threads 4-8, Memory 512-1024 MB, Time limit 60 sec.</div>
+              <div class="settings-hint">Chess.com games are always analyzed from your side automatically. Fast mode: Depth 12-14, Threads 4-8, Memory 512-1024 MB, Time limit 60 sec.</div>
             </details>
 
             <details class="source-block collapsible-block" id="pgn-panel">
@@ -127,6 +123,9 @@
         <div class="analysis-meta">
           <h2 id="analysis-game-title">Game analysis</h2>
           <p id="analysis-source-meta">-</p>
+        </div>
+        <div class="analysis-head-actions">
+          <button id="btn-finish-mate-review" type="button" class="hidden">Finish review</button>
         </div>
         <div class="analysis-stats">
           <span>Accuracy</span>
@@ -221,6 +220,6 @@
   <script src="{{ url_for('static', filename='vendor/jquery/jquery-3.6.0.min.js', v='20260216-09') }}"></script>
   <script src="{{ url_for('static', filename='vendor/chessjs/chess.umd.js', v='20260216-09') }}"></script>
   <script src="{{ url_for('static', filename='vendor/chessboard/chessboard-1.0.0.min.js', v='20260216-09') }}"></script>
-  <script src="{{ url_for('static', filename='app.js', v='20260216-14') }}"></script>
+  <script src="{{ url_for('static', filename='app.js', v='20260504-02') }}"></script>
 </body>
 </html>

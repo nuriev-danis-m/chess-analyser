@@ -42,7 +42,8 @@ const LIGHT_SIDE_TONE = "#efefea";
 const BOARD_MOVE_ANIMATION_MS = 420;
 const STORAGE_KEYS = {
   chesscomUsername: "chess_analyzer.chesscom_username",
-  chesscomMaxGames: "chess_analyzer.chesscom_max_games"
+  chesscomMaxGames: "chess_analyzer.chesscom_max_games",
+  mateReviewedPrefix: "chess_analyzer.mate_hunt.reviewed"
 };
 
 const state = {
@@ -63,7 +64,11 @@ const state = {
   liveAnalyzeTimer: null,
   liveAnalyzeToken: 0,
   analysisBusy: false,
-  massAnalyzeRunning: false
+  massAnalyzeRunning: false,
+  mateReviewContext: null,
+  bootFocusPly: null,
+  batchJob: null,
+  batchStatusTimer: null
 };
 
 const detectedCpuThreads = Math.max(
@@ -82,7 +87,10 @@ const el = {
   chesscomLoadAnalyzeBtn: document.getElementById("btn-load-chesscom-analyze"),
   analyzeMissingBtn: document.getElementById("btn-analyze-missing"),
   reanalyzeAllBtn: document.getElementById("btn-reanalyze-all"),
+  reanalyzeAllDeeperBtn: document.getElementById("btn-reanalyze-all-deeper"),
+  clearCacheBtn: document.getElementById("btn-clear-cache"),
   openStatsBtn: document.getElementById("btn-open-stats"),
+  openMateHuntBtn: document.getElementById("btn-open-mate-hunt"),
   chesscomStatus: document.getElementById("chesscom-status"),
   chesscomGames: document.getElementById("chesscom-games"),
   overviewChart: document.getElementById("overview-chart"),
@@ -102,6 +110,7 @@ const el = {
   pvPlies: document.getElementById("pv-plies"),
 
   backBtn: document.getElementById("btn-back-selection"),
+  finishMateReviewBtn: document.getElementById("btn-finish-mate-review"),
   analysisGameTitle: document.getElementById("analysis-game-title"),
   analysisSourceMeta: document.getElementById("analysis-source-meta"),
 
@@ -203,6 +212,10 @@ function readStoredUsername() {
   }
 }
 
+function normalizeUsername(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
 function readStoredMaxGames() {
   try {
     const value = window.localStorage.getItem(STORAGE_KEYS.chesscomMaxGames);
@@ -285,6 +298,14 @@ function analysisRequestTimeoutMs() {
   return Math.max(70000, seconds * 1000 + 20000);
 }
 
+function deeperAnalysisDepthValue() {
+  return Math.max(analysisDepthValue() + 4, 18);
+}
+
+function deeperAnalysisTargetTimeValue() {
+  return Math.max(analysisTargetTimeValue() * 2, analysisTargetTimeValue() + 60);
+}
+
 function setSelectionBusy(isBusy, label) {
   el.chesscomLoadBtn.disabled = isBusy;
   if (el.chesscomLoadAnalyzeBtn) {
@@ -295,6 +316,12 @@ function setSelectionBusy(isBusy, label) {
   }
   if (el.reanalyzeAllBtn) {
     el.reanalyzeAllBtn.disabled = isBusy || state.massAnalyzeRunning;
+  }
+  if (el.reanalyzeAllDeeperBtn) {
+    el.reanalyzeAllDeeperBtn.disabled = isBusy || state.massAnalyzeRunning;
+  }
+  if (el.clearCacheBtn) {
+    el.clearCacheBtn.disabled = isBusy || state.massAnalyzeRunning;
   }
   if (el.openStatsBtn) {
     el.openStatsBtn.disabled = isBusy || state.massAnalyzeRunning;
@@ -337,6 +364,12 @@ function setGlobalAnalysisBusy(isBusy) {
   if (el.reanalyzeAllBtn) {
     el.reanalyzeAllBtn.disabled = disabled || state.massAnalyzeRunning;
   }
+  if (el.reanalyzeAllDeeperBtn) {
+    el.reanalyzeAllDeeperBtn.disabled = disabled || state.massAnalyzeRunning;
+  }
+  if (el.clearCacheBtn) {
+    el.clearCacheBtn.disabled = disabled || state.massAnalyzeRunning;
+  }
   if (el.openStatsBtn) {
     el.openStatsBtn.disabled = disabled || state.massAnalyzeRunning;
   }
@@ -355,6 +388,13 @@ function setMassAnalyzeRunning(isRunning, label) {
     el.reanalyzeAllBtn.disabled = state.massAnalyzeRunning || state.analysisBusy;
     el.reanalyzeAllBtn.textContent = label || "Reanalyze All";
   }
+  if (el.reanalyzeAllDeeperBtn) {
+    el.reanalyzeAllDeeperBtn.disabled = state.massAnalyzeRunning || state.analysisBusy;
+    el.reanalyzeAllDeeperBtn.textContent = label || "Reanalyze All Deeper";
+  }
+  if (el.clearCacheBtn) {
+    el.clearCacheBtn.disabled = state.massAnalyzeRunning || state.analysisBusy;
+  }
   if (el.chesscomLoadBtn) {
     el.chesscomLoadBtn.disabled = state.massAnalyzeRunning || state.analysisBusy;
   }
@@ -367,6 +407,155 @@ function setMassAnalyzeRunning(isRunning, label) {
   [...document.querySelectorAll(".review-btn")].forEach((button) => {
     button.disabled = state.massAnalyzeRunning || state.analysisBusy;
   });
+}
+
+function currentChesscomUsername() {
+  return String((el.chesscomUsername && el.chesscomUsername.value) || "").trim();
+}
+
+function currentChesscomMaxGames() {
+  const raw = Number((el.chesscomMaxGames && el.chesscomMaxGames.value) || 25);
+  return Number.isFinite(raw) ? Math.max(1, Math.min(5000, Math.floor(raw))) : 25;
+}
+
+function clearBatchStatusTimer() {
+  if (state.batchStatusTimer) {
+    window.clearTimeout(state.batchStatusTimer);
+    state.batchStatusTimer = null;
+  }
+}
+
+function batchJobIsActive(job) {
+  if (!job || typeof job !== "object") {
+    return false;
+  }
+  const status = String(job.status || "").toLowerCase();
+  return Boolean(job.active) || status === "queued" || status === "running";
+}
+
+function batchJobButtonLabel(job) {
+  const base = String(job && job.label || "Batch analysis");
+  const processed = Number(job && job.processed || 0);
+  const total = Number(job && job.total || 0);
+  return `${base} ${processed}/${total}`;
+}
+
+function batchJobStatusLine(job) {
+  if (!job || typeof job !== "object") {
+    return "";
+  }
+  const processed = Number(job.processed || 0);
+  const total = Number(job.total || 0);
+  const currentGameId = String(job.current_game_id || "").trim();
+  const detail = currentGameId ? ` (game_id=${currentGameId})` : "";
+  if (batchJobIsActive(job)) {
+    return `${String(job.label || "Batch analysis")}: ${processed}/${total}${detail}`;
+  }
+  const success = Number(job.success || 0);
+  const failed = Number(job.failed || 0);
+  if (String(job.status || "").toLowerCase() === "completed_with_errors") {
+    return `${String(job.label || "Batch analysis")} finished. Success: ${success}, failed: ${failed}.`;
+  }
+  if (String(job.status || "").toLowerCase() === "completed") {
+    return `${String(job.label || "Batch analysis")} finished. Success: ${success}.`;
+  }
+  return String(job.message || `${String(job.label || "Batch analysis")} status: ${String(job.status || "unknown")}.`);
+}
+
+function scheduleBatchStatusPoll(delayMs = 2500) {
+  clearBatchStatusTimer();
+  const username = currentChesscomUsername();
+  if (!username) {
+    return;
+  }
+  state.batchStatusTimer = window.setTimeout(() => {
+    void syncPersistentBatchStatus({ refreshGamesOnFinish: true });
+  }, delayMs);
+}
+
+function applyPersistentBatchStatus(job, options = {}) {
+  const previousJob = state.batchJob;
+  const wasActive = batchJobIsActive(previousJob);
+  const isActive = batchJobIsActive(job);
+  state.batchJob = job && typeof job === "object" ? job : null;
+
+  if (isActive) {
+    setMassAnalyzeRunning(true, batchJobButtonLabel(job));
+    if (el.chesscomStatus) {
+      el.chesscomStatus.textContent = batchJobStatusLine(job);
+    }
+    scheduleBatchStatusPoll();
+    return;
+  }
+
+  clearBatchStatusTimer();
+  setMassAnalyzeRunning(false);
+  if (job && el.chesscomStatus && !state.analysisBusy) {
+    el.chesscomStatus.textContent = batchJobStatusLine(job);
+  }
+  if (options.refreshGamesOnFinish && wasActive && !state.analysisBusy) {
+    void loadCachedGames();
+  }
+}
+
+async function syncPersistentBatchStatus(options = {}) {
+  const username = currentChesscomUsername();
+  if (!username) {
+    clearBatchStatusTimer();
+    applyPersistentBatchStatus(null, options);
+    return null;
+  }
+
+  const maxGames = currentChesscomMaxGames();
+  try {
+    const response = await fetch(`/api/chesscom/batch-analysis/status?username=${encodeURIComponent(username)}&max_games=${encodeURIComponent(maxGames)}`);
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || "Failed to load batch analysis status.");
+    }
+    applyPersistentBatchStatus(data.job || null, options);
+    return data.job || null;
+  } catch (error) {
+    clearBatchStatusTimer();
+    if (options.reportErrors !== false) {
+      showError(error.message || "Failed to load batch analysis status.");
+    }
+    return null;
+  }
+}
+
+async function startPersistentBatchAnalysis(mode, options = {}) {
+  clearError();
+  const username = currentChesscomUsername();
+  if (!username) {
+    showError("Enter a Chess.com username or profile URL.");
+    return false;
+  }
+  persistUsername(username);
+  persistMaxGames(currentChesscomMaxGames());
+
+  const payload = {
+    username,
+    max_games: currentChesscomMaxGames(),
+    mode,
+    depth: Number.isFinite(Number(options.depth)) ? Number(options.depth) : analysisDepthValue(),
+    threads: analysisThreadsValue(),
+    hash_mb: analysisHashValue(),
+    target_time_sec: Number.isFinite(Number(options.targetTimeSec)) ? Number(options.targetTimeSec) : analysisTargetTimeValue(),
+    pv_plies: Number(el.pvPlies.value || 3)
+  };
+
+  const response = await fetch("/api/chesscom/batch-analysis/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.error || "Failed to start batch analysis.");
+  }
+  applyPersistentBatchStatus(data.job || null, { refreshGamesOnFinish: true });
+  return Boolean(data.started || data.job);
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 180000) {
@@ -731,13 +920,17 @@ function gamesWithGameId() {
 function buildChesscomAnalyzePayload(gameId, side, options = {}) {
   const forceReanalyze = Boolean(options.forceReanalyze);
   const allowCompatibleCache = Boolean(options.allowCompatibleCache);
+  const requestedDepth = Number(options.depth);
+  const requestedTargetTimeSec = Number(options.targetTimeSec);
   return {
     game_id: gameId,
     side,
-    depth: analysisDepthValue(),
+    depth: Number.isFinite(requestedDepth) ? Math.max(6, Math.min(40, Math.round(requestedDepth))) : analysisDepthValue(),
     threads: analysisThreadsValue(),
     hash_mb: analysisHashValue(),
-    target_time_sec: analysisTargetTimeValue(),
+    target_time_sec: Number.isFinite(requestedTargetTimeSec)
+      ? Math.max(20, Math.min(300, Math.round(requestedTargetTimeSec)))
+      : analysisTargetTimeValue(),
     pv_plies: Number(el.pvPlies.value || 3),
     force_reanalyze: forceReanalyze,
     allow_compatible_cache: allowCompatibleCache
@@ -780,59 +973,22 @@ async function analyzeMissingChesscomGames() {
     }
     return;
   }
-
-  setGlobalAnalysisBusy(true);
-  setMassAnalyzeRunning(true, `Analyze 0/${queue.length}`);
-
-  let done = 0;
-  let failed = 0;
-  const failedIds = [];
-
   try {
-    for (let idx = 0; idx < queue.length; idx += 1) {
-      const game = queue[idx];
-      const gameId = String(game.game_id || "").trim();
-      const side = game.player_side === "black" ? "black" : "white";
-      if (!gameId) {
-        failed += 1;
-        continue;
-      }
-
-      if (el.chesscomStatus) {
-        el.chesscomStatus.textContent = `Batch analysis: ${idx + 1}/${queue.length} (game_id=${gameId})`;
-      }
-      setMassAnalyzeRunning(true, `Analyze ${idx + 1}/${queue.length}`);
-
-      try {
-        const data = await analyzeChesscomGameRequest(gameId, side);
-        updateGameStatsAfterAnalysis(gameId, data);
-        done += 1;
-      } catch (error) {
-        failed += 1;
-        failedIds.push(gameId);
-        // Keep running: one bad game should not stop whole batch.
-      }
-
-      if (idx % 5 === 0 || idx === queue.length - 1) {
-        renderHistoryList();
-      }
-    }
-
-    renderHistoryList();
-    const failLabel = failed ? `, failed: ${failed}` : "";
-    if (el.chesscomStatus) {
-      el.chesscomStatus.textContent = `Batch analysis complete. Success: ${done}${failLabel}.`;
-    }
-    if (failedIds.length) {
-      showError(`Failed to analyze ${failedIds.length} games: ${failedIds.slice(0, 8).join(", ")}${failedIds.length > 8 ? "..." : ""}`);
-    }
-  } finally {
-    setMassAnalyzeRunning(false);
-    setGlobalAnalysisBusy(false);
+    await startPersistentBatchAnalysis("missing");
+  } catch (error) {
+    showError(error.message || "Failed to start batch analysis.");
   }
 }
 
 async function reanalyzeAllChesscomGames() {
+  return batchReanalyzeChesscomGames({ deeper: false });
+}
+
+async function reanalyzeAllChesscomGamesDeeper() {
+  return batchReanalyzeChesscomGames({ deeper: true });
+}
+
+async function batchReanalyzeChesscomGames(options = {}) {
   clearError();
   if (!state.chesscomGames.length) {
     showError("Load the games list first.");
@@ -850,56 +1006,16 @@ async function reanalyzeAllChesscomGames() {
     return;
   }
 
-  setGlobalAnalysisBusy(true);
-  setMassAnalyzeRunning(true, `Reanalyze 0/${queue.length}`);
-
-  let done = 0;
-  let failed = 0;
-  const failedIds = [];
-
+  const deeper = Boolean(options.deeper);
+  const targetDepth = deeper ? Math.min(40, deeperAnalysisDepthValue()) : analysisDepthValue();
+  const targetTimeSec = deeper ? Math.min(300, deeperAnalysisTargetTimeValue()) : analysisTargetTimeValue();
   try {
-    for (let idx = 0; idx < queue.length; idx += 1) {
-      const game = queue[idx];
-      const gameId = String(game.game_id || "").trim();
-      const side = game.player_side === "black" ? "black" : "white";
-      if (!gameId) {
-        failed += 1;
-        continue;
-      }
-
-      if (el.chesscomStatus) {
-        el.chesscomStatus.textContent = `Reanalyze: ${idx + 1}/${queue.length} (game_id=${gameId})`;
-      }
-      setMassAnalyzeRunning(true, `Reanalyze ${idx + 1}/${queue.length}`);
-
-      try {
-        const data = await analyzeChesscomGameRequest(gameId, side, {
-          forceReanalyze: true,
-          allowCompatibleCache: false
-        });
-        updateGameStatsAfterAnalysis(gameId, data);
-        done += 1;
-      } catch (error) {
-        failed += 1;
-        failedIds.push(gameId);
-      }
-
-      if (idx % 5 === 0 || idx === queue.length - 1) {
-        renderHistoryList();
-      }
-    }
-
-    renderHistoryList();
-    const failLabel = failed ? `, failed: ${failed}` : "";
-    if (el.chesscomStatus) {
-      el.chesscomStatus.textContent = `Reanalysis complete. Success: ${done}${failLabel}.`;
-    }
-    if (failedIds.length) {
-      showError(`Failed to reanalyze ${failedIds.length} games: ${failedIds.slice(0, 8).join(", ")}${failedIds.length > 8 ? "..." : ""}`);
-    }
-  } finally {
-    setMassAnalyzeRunning(false);
-    setGlobalAnalysisBusy(false);
+    await startPersistentBatchAnalysis(deeper ? "deeper" : "reanalyze", {
+      depth: targetDepth,
+      targetTimeSec
+    });
+  } catch (error) {
+    showError(error.message || "Failed to start batch reanalysis.");
   }
 }
 
@@ -941,6 +1057,7 @@ async function loadChesscomGames() {
 
     renderHistoryList();
     el.chesscomStatus.textContent = `Loaded ${state.chesscomGames.length} games for ${data.username}.`;
+    await syncPersistentBatchStatus({ reportErrors: false });
     return true;
   } catch (error) {
     showError(error.message);
@@ -998,6 +1115,7 @@ async function loadCachedGames() {
     } else {
       el.chesscomStatus.textContent = "Cache is empty. Click Load.";
     }
+    await syncPersistentBatchStatus({ reportErrors: false });
   } catch (error) {
     showError(error.message);
   }
@@ -2517,6 +2635,106 @@ function renderCurrentSuggestions(data) {
   bindSuggestionMoveButtons();
 }
 
+function updateMateReviewButton() {
+  if (!el.finishMateReviewBtn) {
+    return;
+  }
+  const visible = Boolean(state.mateReviewContext && state.analysis);
+  el.finishMateReviewBtn.classList.toggle("hidden", !visible);
+  el.finishMateReviewBtn.disabled = !visible;
+}
+
+function markMateReviewAndReturn() {
+  if (!state.mateReviewContext) {
+    return;
+  }
+  const context = state.mateReviewContext;
+  const usernameKey = normalizeUsername(context.username);
+  const reviewKey = buildMateReviewKey(context.username, context.gameId, context.side);
+  const reviewMap = readMateReviewMap(usernameKey);
+  reviewMap[reviewKey] = {
+    reviewed_at: new Date().toISOString(),
+    game_id: context.gameId,
+    best_mate: context.bestMate || null
+  };
+  writeMateReviewMap(usernameKey, reviewMap);
+
+  const query = new URLSearchParams();
+  if (context.username) {
+    query.set("username", context.username);
+  }
+  query.set("max_games", String(context.maxGames));
+  query.set("tab", "mate-hunt");
+  window.location.href = `/stats?${query.toString()}`;
+}
+
+async function clearAllCache() {
+  clearError();
+  if (state.analysisBusy || state.massAnalyzeRunning) {
+    return;
+  }
+  const confirmed = window.confirm(
+    "Delete all cached Chess.com games, saved analyses, and local mate-hunt review history?"
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  setSelectionBusy(true, "Clearing...");
+  if (el.chesscomStatus) {
+    el.chesscomStatus.textContent = "Clearing local cache...";
+  }
+
+  try {
+    const response = await fetch("/api/chesscom/clear-cache", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ all: true })
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || "Failed to clear cache.");
+    }
+
+    clearAppStorage();
+    state.chesscomGames = [];
+    state.analysis = null;
+    state.mainlineRows = [];
+    state.playerMoveByPly = new Map();
+    state.evalByPly = new Map();
+    state.selectedCategory = "All";
+    state.selectedPly = null;
+    state.currentPly = 0;
+    state.mateReviewContext = null;
+    state.bootFocusPly = null;
+    if (el.chesscomUsername) {
+      el.chesscomUsername.value = "";
+    }
+    if (el.chesscomMaxGames) {
+      el.chesscomMaxGames.value = String(el.chesscomMaxGames.defaultValue || 25);
+    }
+    if (window.history && typeof window.history.replaceState === "function") {
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+    clearBatchStatusTimer();
+    applyPersistentBatchStatus(null);
+    setView("selection");
+    renderHistoryList();
+    updateMateReviewButton();
+
+    if (el.chesscomStatus) {
+      el.chesscomStatus.textContent = `Cache cleared. Removed games: ${Number(data.removed_games || 0)}, analyses: ${Number(data.removed_analyses || 0)}.`;
+    }
+  } catch (error) {
+    showError(error.message || "Failed to clear cache.");
+    if (el.chesscomStatus) {
+      el.chesscomStatus.textContent = "Cache clear failed.";
+    }
+  } finally {
+    setSelectionBusy(false);
+  }
+}
+
 function openAnalysisView(data, sourceLabel) {
   state.analysis = data;
   state.selectedCategory = "All";
@@ -2561,16 +2779,23 @@ function openAnalysisView(data, sourceLabel) {
       state.board.orientation(data.settings.side === "black" ? "black" : "white");
     }
     state.board.resize();
-    goToPly(0);
+    if (Number.isFinite(state.bootFocusPly) && state.bootFocusPly !== null) {
+      goToPly(Math.max(0, Number(state.bootFocusPly) - 1), { animate: false });
+      state.bootFocusPly = null;
+    } else {
+      goToPly(0);
+    }
   }
+  updateMateReviewButton();
 }
 
 async function analyzeChesscomGame(gameId, side, buttonEl) {
   clearError();
-  const prevText = buttonEl.textContent;
+  const triggerButton = buttonEl || { textContent: "Review", disabled: false };
+  const prevText = triggerButton.textContent;
   setGlobalAnalysisBusy(true);
-  buttonEl.disabled = true;
-  buttonEl.textContent = "Analyzing...";
+  triggerButton.disabled = true;
+  triggerButton.textContent = "Analyzing...";
   if (el.chesscomStatus) {
     el.chesscomStatus.textContent = "Game analysis is running. Target: about 1 minute.";
   }
@@ -2580,7 +2805,7 @@ async function analyzeChesscomGame(gameId, side, buttonEl) {
   }
 
   try {
-    const data = await analyzeChesscomGameRequest(gameId, el.side.value);
+    const data = await analyzeChesscomGameRequest(gameId, side === "black" ? "black" : "white");
 
     updateGameStatsAfterAnalysis(gameId, data);
     renderHistoryList();
@@ -2595,9 +2820,126 @@ async function analyzeChesscomGame(gameId, side, buttonEl) {
     }
   } finally {
     setGlobalAnalysisBusy(false);
-    buttonEl.disabled = false;
-    buttonEl.textContent = prevText;
+    triggerButton.disabled = false;
+    triggerButton.textContent = prevText;
   }
+}
+
+function mateReviewStorageKey(usernameKey) {
+  return `${STORAGE_KEYS.mateReviewedPrefix}::${usernameKey || "anonymous"}`;
+}
+
+function readMateReviewMap(usernameKey) {
+  if (!usernameKey) {
+    return {};
+  }
+  try {
+    const raw = window.localStorage.getItem(mateReviewStorageKey(usernameKey));
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (error) {
+    return {};
+  }
+}
+
+function writeMateReviewMap(usernameKey, value) {
+  if (!usernameKey) {
+    return;
+  }
+  try {
+    window.localStorage.setItem(mateReviewStorageKey(usernameKey), JSON.stringify(value || {}));
+  } catch (error) {
+    // Ignore storage issues (private mode / blocked storage).
+  }
+}
+
+function clearAppStorage() {
+  try {
+    const keysToRemove = [];
+    for (let i = 0; i < window.localStorage.length; i += 1) {
+      const key = String(window.localStorage.key(i) || "");
+      if (key.startsWith("chess_analyzer.")) {
+        keysToRemove.push(key);
+      }
+    }
+    keysToRemove.forEach((key) => window.localStorage.removeItem(key));
+  } catch (error) {
+    // Ignore storage issues.
+  }
+}
+
+function buildMateReviewKey(username, gameId, side) {
+  const normalizedSide = String(side || "").trim().toLowerCase() === "black" ? "black" : "white";
+  return `${normalizeUsername(username)}::${String(gameId || "").trim()}::${normalizedSide}`;
+}
+
+function parseBootQuery() {
+  const query = new URLSearchParams(window.location.search);
+  const username = String(query.get("username") || "").trim();
+  const gameId = String(query.get("game_id") || "").trim();
+  const sideRaw = String(query.get("side") || "").trim().toLowerCase();
+  const maxRaw = Number(query.get("max_games"));
+  const mateReviewGameId = String(query.get("mate_review_game") || "").trim();
+  const mateReviewSideRaw = String(query.get("mate_review_side") || "").trim().toLowerCase();
+  const focusPlyRaw = Number(query.get("focus_ply"));
+  return {
+    username,
+    gameId,
+    side: sideRaw === "black" ? "black" : "white",
+    maxGames: Number.isFinite(maxRaw) ? Math.max(1, Math.min(5000, Math.floor(maxRaw))) : null,
+    mateReviewGameId,
+    mateReviewSide: mateReviewSideRaw === "black" ? "black" : "white",
+    focusPly: Number.isFinite(focusPlyRaw) ? Math.max(1, Math.floor(focusPlyRaw)) : null
+  };
+}
+
+async function bootIntoRequestedGame() {
+  const boot = parseBootQuery();
+  if (boot.username && el.chesscomUsername) {
+    el.chesscomUsername.value = boot.username;
+    persistUsername(boot.username);
+  }
+  if (boot.maxGames !== null && el.chesscomMaxGames) {
+    el.chesscomMaxGames.value = String(boot.maxGames);
+    persistMaxGames(boot.maxGames);
+  }
+  if (el.side && (boot.side === "white" || boot.side === "black")) {
+    el.side.value = boot.side;
+  }
+  state.mateReviewContext = boot.mateReviewGameId
+    ? {
+        username: boot.username,
+        maxGames: boot.maxGames !== null ? boot.maxGames : 5000,
+        gameId: boot.mateReviewGameId,
+        side: boot.mateReviewSide,
+        bestMate: null
+      }
+    : null;
+  state.bootFocusPly = boot.focusPly;
+  updateMateReviewButton();
+
+  if (!boot.gameId) {
+    await loadCachedGames();
+    return;
+  }
+
+  const loaded = boot.username ? await loadChesscomGames() : (await loadCachedGames(), true);
+  if (!loaded) {
+    return;
+  }
+
+  const matchedGame = state.chesscomGames.find((game) => String((game && game.game_id) || "") === boot.gameId) || null;
+  const resolvedSide = matchedGame && matchedGame.player_side === "black" ? "black" : boot.side;
+  if (el.side) {
+    el.side.value = resolvedSide;
+  }
+  if (state.mateReviewContext && state.mateReviewContext.gameId === boot.gameId) {
+    state.mateReviewContext.side = resolvedSide;
+  }
+  await analyzeChesscomGame(boot.gameId, resolvedSide, null);
 }
 
 function buildPgnFormData({ textOnly }) {
@@ -2745,6 +3087,12 @@ function bindEvents() {
   if (el.reanalyzeAllBtn) {
     el.reanalyzeAllBtn.addEventListener("click", reanalyzeAllChesscomGames);
   }
+  if (el.reanalyzeAllDeeperBtn) {
+    el.reanalyzeAllDeeperBtn.addEventListener("click", reanalyzeAllChesscomGamesDeeper);
+  }
+  if (el.clearCacheBtn) {
+    el.clearCacheBtn.addEventListener("click", clearAllCache);
+  }
   if (el.openStatsBtn) {
     el.openStatsBtn.addEventListener("click", () => {
       const username = String((el.chesscomUsername && el.chesscomUsername.value) || "").trim();
@@ -2761,6 +3109,27 @@ function bindEvents() {
       query.set("max_games", String(maxGames));
       window.location.href = `/stats?${query.toString()}`;
     });
+  }
+  if (el.openMateHuntBtn) {
+    el.openMateHuntBtn.addEventListener("click", () => {
+      const username = String((el.chesscomUsername && el.chesscomUsername.value) || "").trim();
+      const maxGamesRaw = Number((el.chesscomMaxGames && el.chesscomMaxGames.value) || 5000);
+      const maxGames = Number.isFinite(maxGamesRaw) ? Math.max(1, Math.min(5000, Math.floor(maxGamesRaw))) : 5000;
+      persistMaxGames(maxGames);
+      if (username) {
+        persistUsername(username);
+      }
+      const query = new URLSearchParams();
+      if (username) {
+        query.set("username", username);
+      }
+      query.set("max_games", String(maxGames));
+      query.set("tab", "mate-hunt");
+      window.location.href = `/stats?${query.toString()}`;
+    });
+  }
+  if (el.finishMateReviewBtn) {
+    el.finishMateReviewBtn.addEventListener("click", markMateReviewAndReturn);
   }
   if (el.chesscomUsername) {
     el.chesscomUsername.addEventListener("change", () => {
@@ -2850,15 +3219,20 @@ function bindEvents() {
 }
 
 function init() {
+  const boot = parseBootQuery();
   if (el.chesscomUsername) {
     const savedUsername = readStoredUsername();
-    if (savedUsername) {
+    if (boot.username) {
+      el.chesscomUsername.value = boot.username;
+    } else if (savedUsername) {
       el.chesscomUsername.value = savedUsername;
     }
   }
   if (el.chesscomMaxGames) {
     const savedMaxGames = readStoredMaxGames();
-    if (savedMaxGames !== null) {
+    if (boot.maxGames !== null) {
+      el.chesscomMaxGames.value = String(boot.maxGames);
+    } else if (savedMaxGames !== null) {
       el.chesscomMaxGames.value = String(savedMaxGames);
     }
   }
@@ -2884,7 +3258,9 @@ function init() {
   updateEvalScale(0, null);
   bindEvents();
   setView("selection");
-  void loadCachedGames();
+  void bootIntoRequestedGame().finally(() => {
+    void syncPersistentBatchStatus({ refreshGamesOnFinish: true, reportErrors: false });
+  });
 }
 
 init();
